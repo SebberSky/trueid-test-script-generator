@@ -34,6 +34,16 @@ Existing GWT scenarios are parsed individually from AC, description, and comment
 
 Script generation uses APIs inspected in `trueid-app-v3-e2e`: `core/fixtures/screenplays.ts`, `common/component/BottomNavigation.ts`, `RootTab.ts`, and `OpenMainScreenPlayImpl.ts`. Every case is exported. Exact navigation scenarios with mapped guest/basic-login preconditions and matching tab assertions have no incomplete guard. Other cases include a visible per-case warning with what is missing and what to add, matching inline TODOs, and an `INCOMPLETE SCRIPT` error guard to remove after completion. They are not automatically skipped or allowed to pass with missing checks. Scroll-to-top is not asserted by swiping the page back up. Device execution still requires the actual E2E repository and its test environment.
 
+## Jira media and files
+
+The ticket response includes every attachment plus media references discovered in description, ADF custom fields and comments. Media groups/single/inline nodes, wiki attachment references, link marks and embedded cards retain their source. Media Services UUIDs are matched to attachment IDs through server-side redirect metadata when filenames or attachment IDs do not identify a file uniquely. Unresolved references remain visible with an explicit warning and an original Jira link.
+
+Raster images have lazy previews; videos and audio use native browser players with byte-range streaming for playback seeking. PDF files can open in the browser viewer. Office documents, archives, SVG, HTML and all other binary types remain available as downloads. A codec or format unsupported by the browser is reported with download/Jira alternatives. External media is linked rather than automatically fetched or embedded.
+
+`GET /api/jira/attachment` accepts only a ticket key, authorized cloud ID and numeric attachment ID. It verifies access and membership in the issue attachment list before streaming from the Jira API. OAuth tokens and signed Media Services URLs are not sent to client code. Responses are private/no-store, support single byte ranges, and force active document formats to download with a sandbox policy. The existing read-only scopes are sufficient; no Jira write permission is used.
+
+This feature presents and downloads media. It does not perform OCR, vision inference, transcription, or automatically convert media content into GWT.
+
 ## Publishing
 
 Build with `node scripts/build.mjs`; use the Sites source workflow to commit and push the exact source and package `dist/server/index.js` plus `dist/.openai/hosting.json`. Preserve the existing `project_id` and audience. Production credentials are managed separately from Git.

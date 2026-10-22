@@ -1,4 +1,5 @@
 import {parseGwt, ticketScenarios, draftCriteria, generateScript} from './parser.js';
+import {renderMedia} from './media.js';
 const $ = id => document.getElementById(id);
 let auth = {connected: false, sites: []};
 let loaded = null;
@@ -91,6 +92,7 @@ function invalidateTicket() {
   $('criteria').value = ''; $('criteriaSource').textContent = 'Ticket changed. Load again to read the current source.';
   $('description').textContent = ''; $('comments').replaceChildren();
   $('descriptionDetails').hidden = true; $('commentsDetails').hidden = true;
+  renderMedia(null, $('media'));
 }
 $('ticket').addEventListener('input', invalidateTicket);
 $('workspace').addEventListener('change', invalidateTicket);
@@ -125,6 +127,7 @@ $('load').addEventListener('click', async () => {
     $('comments').replaceChildren(...ticket.comments.map(comment => {
       const element = document.createElement('div'); element.className = 'comment'; element.textContent = `${comment.author} · ${comment.id}\n${comment.text}`; return element;
     })); $('commentsDetails').hidden = false;
+    renderMedia(ticket, $('media'));
     scenarios = ticketScenarios(ticket);
     if (!scenarios.length) {
       scenarios = draftCriteria($('criteria').value, ac.length ? 'Original Jira AC · draft interpretation' : 'Original description · draft interpretation');
@@ -137,6 +140,7 @@ $('load').addEventListener('click', async () => {
     $('criteria').value = ''; $('criteriaSource').textContent = 'Ticket was not loaded.';
     $('ticketMeta').replaceChildren(); $('comments').replaceChildren();
     $('descriptionDetails').hidden = true; $('commentsDetails').hidden = true;
+    renderMedia(null, $('media'));
     $('sourceState').textContent = 'LOAD FAILED'; error(problem.message);
     if (problem.status === 401) { auth.connected = false; showAuth(); }
   } finally {

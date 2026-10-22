@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
 import * as parser from '../web/parser.js';
+import * as media from '../web/media.js';
 
 class Element {
   constructor(value = '') { this.value = value; this.textContent = ''; this.listeners = {}; this.children = []; this.classList = {add() {}, remove() {}}; }
@@ -24,7 +25,7 @@ async function browser() {
   get('workspace').value = 'cloud-1'; get('ticket').value = 'VAL-1';
   const pending = [];
   const context = vm.createContext({
-    ...parser, URLSearchParams, AbortController, Date, console,
+    ...parser, ...media, URLSearchParams, AbortController, Date, console,
     Option: class extends Element { constructor(name, value) { super(value); this.textContent = name; } },
     document: {getElementById: get, createElement: () => new Element(), createTextNode: text => ({textContent: text})},
     location: {search: '', pathname: '/'}, history: {replaceState() {}}, navigator: {clipboard: {writeText: async () => {}}}, setTimeout() {},
@@ -33,7 +34,7 @@ async function browser() {
       const request = deferred(); pending.push(request); return request.promise;
     },
   });
-  const source = (await readFile(new URL('../web/app.js', import.meta.url), 'utf8')).replace(/^import[^\n]+\n/, '');
+  const source = (await readFile(new URL('../web/app.js', import.meta.url), 'utf8')).replace(/^import[^\n]+\n/gm, '');
   new vm.Script(source).runInContext(context);
   await new Promise(setImmediate);
   return {get, pending};

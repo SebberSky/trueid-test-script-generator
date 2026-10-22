@@ -1,3 +1,4 @@
+import {collectMedia, mediaInventory, inlineMime} from './media.js';
 // Atlassian tokens are encrypted with a server-only key in HttpOnly session cookies.
 const SCOPES = ['read:jira-work', 'read:jira-user', 'read:me', 'read:account', 'offline_access'];
 const CALLBACK = '/api/auth/jira/callback';
@@ -136,6 +137,7 @@ function adfText(node) {
   if (node.type === 'hardBreak') return '\n';
   if (node.type === 'mention') return node.attrs?.text || '';
   if (node.type === 'inlineCard') return node.attrs?.url || '';
+  if (['media', 'mediaInline'].includes(node.type)) return `[Media: ${node.attrs?.alt || node.attrs?.id || node.attrs?.url || 'embedded file'}]`;
   if (node.type === 'emoji') return node.attrs?.text || node.attrs?.shortName || '';
   if (node.type === 'table') return (node.content || []).map(row => '| ' + (row.content || []).map(cell => adfText(cell).trim().replace(/\n/g, '<br>').replace(/\|/g, '\\|')).join(' | ') + ' |').join('\n') + '\n';
   const value = (node.content || []).map(adfText).join('');
@@ -167,15 +169,71 @@ async function jiraTicket(request, env, headers) {
     if (!batch.comments?.length || page === 99) throw new AppError(502, 'comments_incomplete', 'Could not retrieve all ticket comments. No partial ticket was loaded.');
   }
   const fields = issue.fields || {};
+  const references = [];
+  for (const [id, value] of Object.entries(fields)) {
+    if (id === 'description' || id.startsWith('customfield_') || (value && typeof value === 'object' && value.type === 'doc')) collectMedia(value, id === 'description' ? 'Description' : (issue.names?.[id] || id), references);
+  }
+  for (const comment of comments) collectMedia(comment.body, `Comment ${comment.id} · ${comment.author?.displayName || ''}`, references);
+  const files = (fields.attachment || []).map(file => ({...file, id: String(file.id)}));
+  const needsIds = references.some(ref => ref.kind === 'file' && ref.mediaId && !files.some(file => file.id === ref.mediaId) && files.filter(file => ref.filename && file.filename === ref.filename).length !== 1);
+  if (needsIds) {
+    for (let offset = 0; offset < files.length; offset += 3) {
+      await Promise.all(files.slice(offset, offset + 3).map(async file => {
+        try {
+          const probe = await fetch(`${base}/attachment/content/${encodeURIComponent(file.id)}?redirect=true`, {headers: {Authorization: `Bearer ${token}`}, redirect: 'manual', signal: AbortSignal.timeout(10000)});
+          file.mediaId = probe.headers.get('location')?.match(/\/file\/([0-9a-f-]{36})(?:\/|\?)/i)?.[1];
+          await probe.body?.cancel();
+        } catch { file.mediaId = null; }
+      }));
+    }
+  }
+  const ticketUrl = `${site.url}/browse/${issue.key}`;
+  const media = mediaInventory(files, references, issue.key, site.id, ticketUrl);
   return {
     key: issue.key, summary: fields.summary || '', url: `${site.url}/browse/${issue.key}`,
     site: {id: site.id, name: site.name, url: site.url},
     description: adfText(fields.description).trim(), acceptanceCriteria: extractCriteria(fields, issue.names),
     comments: comments.map(comment => ({id: comment.id, author: comment.author?.displayName || '', updated: comment.updated, text: adfText(comment.body).trim()})),
-    attachments: (fields.attachment || []).map(file => ({id: file.id, filename: file.filename, mimeType: file.mimeType, size: file.size})),
+    attachments: media.attachments, media,
     status: fields.status?.name || '', issueType: fields.issuetype?.name || '', updated: fields.updated,
     fetchedAt: new Date().toISOString(),
   };
+}
+async function attachmentContent(request, env, headers) {
+  const url = new URL(request.url);
+  const ticket = parseTicket(url.searchParams.get('ticket'));
+  const attachmentId = url.searchParams.get('attachmentId') || '';
+  const cloudId = url.searchParams.get('cloudId') || '';
+  if (!/^\d+$/.test(attachmentId) || !cloudId) throw new AppError(400, 'invalid_attachment', 'A Jira cloud site, issue and attachment ID are required.');
+  const range = request.headers.get('range');
+  if (range && (!/^bytes=(?:\d+-\d*|-\d+)$/.test(range))) throw new AppError(416, 'invalid_range', 'Only one byte range is supported.');
+  const token = await accessToken(request, env, headers);
+  const sites = await upstream('https://api.atlassian.com/oauth/token/accessible-resources', token);
+  const site = sites.find(site => site.id === cloudId && site.scopes?.includes('read:jira-work') && (!ticket.hostname || new URL(site.url).hostname === ticket.hostname));
+  if (!site) throw new AppError(403, 'site_not_authorized', 'This Jira site has not been authorized.');
+  const base = `https://api.atlassian.com/ex/jira/${encodeURIComponent(site.id)}/rest/api/3`;
+  const issue = await upstream(`${base}/issue/${ticket.key}?fields=attachment`, token);
+  const file = (issue.fields?.attachment || []).find(file => String(file.id) === attachmentId);
+  if (!file) throw new AppError(404, 'attachment_not_found', 'This attachment is not present on the authorized issue.');
+  const outgoing = {Authorization: `Bearer ${token}`, Accept: '*/*', 'Accept-Encoding': 'identity', ...(range ? {Range: range} : {})};
+  let response;
+  try { response = await fetch(`${base}/attachment/content/${attachmentId}?redirect=false`, {headers: outgoing, redirect: 'manual', signal: AbortSignal.timeout(30000)}); }
+  catch { throw new AppError(502, 'attachment_unavailable', 'Cannot load the attachment. Try again or open the original in Jira.'); }
+  if (![200, 206, 416].includes(response.status)) {
+    await response.body?.cancel();
+    throw new AppError([401, 403, 404, 429].includes(response.status) ? response.status : 502, 'attachment_unavailable', 'Jira could not return this file. Open the original in Jira or try again.');
+  }
+  const previewMime = inlineMime(file.mimeType);
+  const download = url.searchParams.get('download') === '1' || !previewMime;
+  headers.set('Content-Type', previewMime || 'application/octet-stream');
+  const fallback = String(file.filename || 'attachment').replace(/[^a-zA-Z0-9._-]/g, '_');
+  const encodedName = encodeURIComponent(String(file.filename || 'attachment')).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  headers.set('Content-Disposition', `${download ? 'attachment' : 'inline'}; filename="${fallback}"; filename*=UTF-8''${encodedName}`);
+  headers.set('Cache-Control', 'private, no-store');
+  headers.set('Cross-Origin-Resource-Policy', 'same-origin');
+  headers.set('Content-Security-Policy', "sandbox; default-src 'none'");
+  for (const name of ['content-length', 'content-range', 'accept-ranges']) if (response.headers.has(name)) headers.set(name, response.headers.get(name));
+  return new Response(response.body, {status: response.status, headers});
 }
 async function handle(request, env, headers) {
   const url = new URL(request.url);
@@ -226,6 +284,7 @@ async function handle(request, env, headers) {
   if (url.pathname === '/api/jira/ticket' && request.method === 'GET') {
     return json(await jiraTicket(request, env, headers), 200, headers);
   }
+  if (url.pathname === '/api/jira/attachment' && request.method === 'GET') return attachmentContent(request, env, headers);
   return json({error: 'not_found', message: 'Not found'}, 404);
 }
 export {adfText, extractCriteria, parseTicket};
@@ -240,7 +299,7 @@ export default {
     }
     response.headers.set('X-Content-Type-Options', 'nosniff');
     response.headers.set('Referrer-Policy', 'no-referrer');
-    response.headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'");
+    if (!response.headers.has('Content-Security-Policy')) response.headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; media-src 'self'; frame-src 'self'; object-src 'none'; connect-src 'self'; base-uri 'none'; form-action 'self'");
     return response;
   },
 };
