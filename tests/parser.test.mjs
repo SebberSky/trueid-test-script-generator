@@ -28,8 +28,24 @@ test('raw AC drafts are marked unconfirmed and unsupported scripts never pretend
   const output = generateScript('VAL-1928', drafts);
   assert.equal(output.pending, 2);
   assert.equal(output.runnable, 0);
-  assert.match(output.code, /test.skip\(true/);
+  assert.match(output.code, /throw new Error\("INCOMPLETE SCRIPT:/);
+  assert.doesNotMatch(output.code, /test.skip\(/);
+  assert.equal(output.warnings.length, 2);
   assert.doesNotMatch(output.code, /scrollToTop\(/);
+});
+test('back-to-top exports every script with precise missing mappings and follow-up actions', () => {
+  const cases = ['Today', 'Watch', 'Privilege', 'Community', 'Shopping'].map(tab => ({name: tab, given: 'User type:\nLogin user/Non login', when: `Open TrueID app\nTap Bottom Navigation menu on ${tab} page\nUser scroll down page\nTap Bottom Navigation menu (previous) again`, then: 'User can Back to top page.', source: 'Description', draft: false}));
+  const output = generateScript('VAL-1928', cases);
+  assert.equal((output.code.match(/\ntest\(/g) || []).length, 5);
+  assert.equal(output.warnings.length, 5);
+  assert.equal(output.pending, 5);
+  assert.doesNotMatch(output.code, /test.skip\(/);
+  assert.equal((output.code.match(/throw new Error\(/g) || []).length, 5);
+  assert.ok(output.warnings.every(warning => warning.issues.some(issue => issue.missing.includes('กดแท็บเดิม'))));
+  assert.ok(output.warnings.every(warning => warning.issues.some(issue => issue.action.includes('scroll-offset'))));
+  assert.ok(output.warnings.every(warning => warning.issues.some(issue => issue.action.includes('แยกเคส Login'))));
+  assert.ok(output.warnings[3].issues.some(issue => issue.missing.includes('Community')));
+  assert.ok(output.warnings.every(warning => warning.issues.every(issue => issue.missing && issue.action)));
 });
 test('plain navigation uses repository Screenplay fixtures and the requested tab', () => {
   const output = generateScript('VAL-1', [{name: 'Watch', given: '', when: 'Tap Watch', then: 'Watch page is displayed', source: 'Jira', draft: false}]);
@@ -37,7 +53,7 @@ test('plain navigation uses repository Screenplay fixtures and the requested tab
   assert.match(output.code, /selectTab\('watch'\)/);
   assert.match(output.code, /expectTabContent\('watch'\)/);
 });
-test('known guest and login preconditions map to OpenMain while mismatched assertions stay skipped', () => {
+test('known guest and login preconditions map to OpenMain while mismatched assertions stay incomplete', () => {
   const flow = {name: 'Watch', given: 'guest', when: 'Tap Watch', then: 'Watch page is displayed', source: 'Jira', draft: false};
   assert.equal(generateScript('VAL-1', [flow]).runnable, 1);
   const login = generateScript('VAL-1', [{...flow, given: 'logged in user'}]);

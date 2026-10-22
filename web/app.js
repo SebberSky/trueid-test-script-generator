@@ -7,7 +7,29 @@ let loading = null;
 let version = 0;
 const toast = message => { $('toast').textContent = message; $('toast').classList.add('show'); setTimeout(() => $('toast').classList.remove('show'), 2500); };
 function error(message = '') { $('error').textContent = message; }
-function clearOutput() { $('code').textContent = 'Generate a script from the current scenarios.'; $('generationStatus').textContent = ''; }
+function clearOutput() { $('code').textContent = 'Generate a script from the current scenarios.'; $('generationStatus').textContent = ''; $('scriptWarnings').replaceChildren(); $('scriptWarnings').hidden = true; }
+function showWarnings(warnings) {
+  const container = $('scriptWarnings');
+  container.replaceChildren(); container.hidden = !warnings.length;
+  if (!warnings.length) return;
+  const heading = document.createElement('strong');
+  heading.textContent = '⚠ WARNING: สคริปต์ยังทำงานตามเคสไม่ได้ครบ';
+  const note = document.createElement('p');
+  note.textContent = 'สร้างและ Copy สคริปต์ได้ทุกเคส แต่ต้องเติมสิ่งที่ขาดด้านล่างก่อนรัน เคสที่ยังไม่ครบจะ throw INCOMPLETE SCRIPT แทนการ skip หรือผ่านโดยไม่ตรวจผลจริง';
+  container.append(heading, note);
+  for (const warning of warnings) {
+    const entry = document.createElement('details'); entry.open = warning.index === 1;
+    const title = document.createElement('summary'); title.textContent = `เคส ${warning.index}: ${warning.name} — ขาด ${warning.issues.length} รายการ`;
+    const list = document.createElement('ul');
+    for (const issue of warning.issues) {
+      const item = document.createElement('li');
+      const missing = document.createElement('div'); missing.textContent = 'ขาด: ' + issue.missing;
+      const action = document.createElement('div'); action.textContent = 'ต้องเพิ่ม: ' + issue.action;
+      item.append(missing, action); list.append(item);
+    }
+    entry.append(title, list); container.append(entry);
+  }
+}
 async function api(path, options = {}) {
   const response = await fetch(path, {credentials: 'same-origin', cache: 'no-store', ...options});
   const data = await response.json();
@@ -126,8 +148,9 @@ $('generate').addEventListener('click', () => {
   if (!scenarios.length) { error('Load a ticket or enter acceptance criteria first.'); return; }
   const output = generateScript(loaded?.key || 'MANUAL', scenarios);
   $('code').textContent = output.code;
-  $('generationStatus').textContent = `${scenarios.length} tests · ${output.runnable} mapped · ${output.pending} skipped pending repository mappings / confirmed assertions. Device execution has not been performed.`;
-  toast('Script generated. Review pending cases before running.');
+  $('generationStatus').textContent = `${scenarios.length} scripts generated · ${output.runnable} mapped · ${output.pending} incomplete. Device execution has not been performed.`;
+  showWarnings(output.warnings);
+  toast(output.pending ? 'สร้างสคริปต์ครบแล้ว — อ่าน WARNING และ TODO ก่อนรัน' : 'Script generated. Review before running.');
 });
 $('copy').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText($('code').textContent); toast('Script copied'); }

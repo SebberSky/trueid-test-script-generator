@@ -32,7 +32,7 @@ Load a Jira key, browse URL, or board URL with `selectedIssue`. The user selects
 
 Existing GWT scenarios are parsed individually from AC, description, and comments. Plain AC becomes explicitly unconfirmed drafts that the user can edit. There is no AI-model integration in this version: drafts are rule-based and do not claim to infer missing Given/When steps.
 
-Script generation uses APIs inspected in `trueid-app-v3-e2e`: `core/fixtures/screenplays.ts`, `common/component/BottomNavigation.ts`, `RootTab.ts`, and `OpenMainScreenPlayImpl.ts`. Only exact navigation scenarios with mapped guest/basic-login preconditions and matching tab assertions are enabled. Other cases contain `test.skip` and a reason. Scroll-to-top is not asserted by swiping the page back up. Device execution still requires the actual E2E repository and its test environment.
+Script generation uses APIs inspected in `trueid-app-v3-e2e`: `core/fixtures/screenplays.ts`, `common/component/BottomNavigation.ts`, `RootTab.ts`, and `OpenMainScreenPlayImpl.ts`. Every case is exported. Exact navigation scenarios with mapped guest/basic-login preconditions and matching tab assertions have no incomplete guard. Other cases include a visible per-case warning with what is missing and what to add, matching inline TODOs, and an `INCOMPLETE SCRIPT` error guard to remove after completion. They are not automatically skipped or allowed to pass with missing checks. Scroll-to-top is not asserted by swiping the page back up. Device execution still requires the actual E2E repository and its test environment.
 
 ## Publishing
 
