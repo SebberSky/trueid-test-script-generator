@@ -24,7 +24,7 @@ The registered Atlassian callback must exactly match:
 
 The app requests `read:jira-work`, `read:jira-user`, `read:me`, `read:account`, and `offline_access`. The latter enables rotating refresh tokens and does not grant Jira writes. All Jira resource requests use GET against the Atlassian gateway and validate the authorized cloud site. OAuth exchanges use POST only to the Atlassian token endpoint.
 
-Access and refresh tokens are encrypted using a server-only AES-GCM key, bound to the configured origin and session, and carried in separate HttpOnly, Secure, SameSite=Lax cookies. They are never returned to browser JavaScript. Rotating `SESSION_SECRET` invalidates existing sessions. Disconnect clears this browser's session; it does not revoke the Atlassian app grant. The Site's existing audience is preserved, with Jira data isolated by the visitor's own OAuth session.
+Access and refresh tokens are encrypted using a server-only AES-GCM key, bound to the configured origin and session, and carried in separate HttpOnly, Secure, SameSite=Lax cookies. A separate login binding is established only on the OAuth callback and cleared on Disconnect, so a delayed refresh response cannot restore a disconnected browser session. Existing sessions created before this binding was introduced must log in again. Sessions have a maximum login-binding lifetime of 30 days. Tokens are never returned to browser JavaScript. Rotating `SESSION_SECRET` invalidates existing sessions. Disconnect clears this browser's session; it does not revoke the Atlassian app grant or invalidate a previously copied complete cookie set on the server. The Site's existing audience is preserved, with Jira data isolated by the visitor's own OAuth session.
 
 ## Ticket and generation behavior
 

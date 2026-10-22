@@ -8,16 +8,7 @@ export function parseGwt(text, source = 'Pasted criteria') {
   const result = [];
   let columns = null;
   let table = 0;
-  for (const line of lines) {
-    if (!line.trim().startsWith('|')) { if (line.trim()) columns = null; continue; }
-    const row = cells(line);
-    const indexes = ['given', 'when', 'then'].map(word => row.findIndex(cell => new RegExp('^' + word + '\\b', 'i').test(cell)));
-    if (indexes.every(index => index >= 0)) { columns = indexes; table++; continue; }
-    if (!columns || row.every(cell => /^[-:\s]*$/.test(cell))) continue;
-    const [given, when, then] = columns.map(index => row[index] || '');
-    if (given || when || then) result.push({name: `Scenario ${result.length + 1}`, given, when, then, source: `${source} · table ${table}, row ${result.length + 1}`, draft: false});
-  }
-  if (result.length) return result;
+  let tableRow = 0;
   let current = null;
   let section = null;
   let background = '';
@@ -27,6 +18,20 @@ export function parseGwt(text, source = 'Pasted criteria') {
     current = null; section = null;
   }
   for (const rawLine of lines) {
+    if (rawLine.trim().startsWith('|')) {
+      finish();
+      const row = cells(rawLine);
+      const indexes = ['given', 'when', 'then'].map(word => row.findIndex(cell => new RegExp('^' + word + '\\b', 'i').test(cell)));
+      if (indexes.every(index => index >= 0)) { columns = indexes; table++; tableRow = 0; continue; }
+      if (!columns || row.every(cell => /^[-:\s]*$/.test(cell))) continue;
+      const [given, when, then] = columns.map(index => row[index] || '');
+      if (given || when || then) {
+        tableRow++;
+        result.push({name: `Scenario ${result.length + 1}`, given, when, then, source: `${source} · table ${table}, row ${tableRow}`, draft: false});
+      }
+      continue;
+    }
+    if (rawLine.trim()) columns = null;
     const line = clean(rawLine);
     if (/^Background\s*:/i.test(line)) { finish(); inBackground = true; continue; }
     const title = line.match(/^(?:Scenario(?: Outline)?|Example|กรณีทดสอบ)\s*:\s*(.*)/i);
@@ -54,10 +59,12 @@ export function ticketSources(ticket) {
   ].filter(source => source.text.trim());
 }
 export function ticketScenarios(ticket) {
-  return ticketSources(ticket).flatMap(source => parseGwt(source.text, source.name));
+  return ticketSources(ticket).flatMap(source => {
+    const parsed = parseGwt(source.text, source.name);
+    return parsed.length || source.kind !== 'ac' ? parsed : draftCriteria(source.text, source.name + ' · draft interpretation');
+  });
 }
 export function draftCriteria(text, source = 'Acceptance criteria') {
-  // These are visibly unconfirmed drafts, never claimed to be AI-generated or Jira GWT.
   const criteria = text.split(/\r?\n/).map(line => clean(line).replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '')).filter(Boolean);
   return criteria.map((criterion, index) => ({name: `Draft ${index + 1}`, given: '', when: '', then: criterion, source, draft: true}));
 }
@@ -67,7 +74,6 @@ export function generateScript(ticketKey, scenarios) {
   const cases = scenarios.map((flow, index) => {
     const tab = supportedTabs.find(tab => new RegExp('\\b' + tab + '\\b', 'i').test(flow.when + ' ' + flow.then));
     const scroll = /scroll|back to top|กลับ.*บน/i.test(flow.when + ' ' + flow.then);
-    // Screen APIs have no verified top-position assertion; do not substitute a swipe as proof.
     const target = tab || '';
     const simpleNavigation = tab && new RegExp('^(?:(?:the )?user )?(?:tap|taps|select|selects|open|opens) (?:the )?' + target + '(?: tab| page| screen)?[.!]?$', 'i').test(flow.when.trim()) &&
       new RegExp('^(?:the )?' + target + '(?: tab| page| screen)? (?:is )?(?:displayed|visible|shown)[.!]?$', 'i').test(flow.then.trim());
@@ -87,7 +93,7 @@ export function generateScript(ticketKey, scenarios) {
     } else if (!simpleNavigation) issues.push({missing: 'When / Then ยัง map เป็น actions และ assertions ได้ไม่ครบ', action: 'เพิ่ม actions ตามลำดับและ assertions ของผลลัพธ์ทั้งหมด โดยใช้ API ที่มีจริงใน repo'});
     const reason = issues.map(issue => `${issue.missing} — ต้องเพิ่ม: ${issue.action}`).join(' | ');
     const lines = [
-      `test(${quote(`${ticketKey || 'MANUAL'} — ${flow.name || `Scenario ${index + 1}`}`)}, async ({ startApp, openMain, mainScreen }) => {`,
+      `test(${quote(`${ticketKey || 'MANUAL'} — ${index + 1}. ${flow.name || 'Scenario'}`)}, async ({ startApp, openMain, mainScreen }) => {`,
       '  test.setTimeout(240_000);',
       ...(!runnable ? [
         '  // WARNING: สคริปต์นี้ยังทำงานตามเคสไม่ได้ ต้องทำ TODO ต่อไปนี้ให้ครบ',

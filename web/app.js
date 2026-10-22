@@ -8,6 +8,10 @@ let version = 0;
 const toast = message => { $('toast').textContent = message; $('toast').classList.add('show'); setTimeout(() => $('toast').classList.remove('show'), 2500); };
 function error(message = '') { $('error').textContent = message; }
 function clearOutput() { $('code').textContent = 'Generate a script from the current scenarios.'; $('generationStatus').textContent = ''; $('scriptWarnings').replaceChildren(); $('scriptWarnings').hidden = true; }
+function cancelLoad() {
+  loading?.abort(); loading = null; version++;
+  $('load').disabled = false; $('load').textContent = 'Load ticket';
+}
 function showWarnings(warnings) {
   const container = $('scriptWarnings');
   container.replaceChildren(); container.hidden = !warnings.length;
@@ -81,7 +85,7 @@ function render() {
   });
 }
 function invalidateTicket() {
-  loading?.abort(); version++; loaded = null; scenarios = []; clearOutput(); render();
+  cancelLoad(); loaded = null; scenarios = []; clearOutput(); render();
   $('sourceState').textContent = 'NOT LOADED'; $('ticketMeta').replaceChildren();
   $('criteria').value = ''; $('criteriaSource').textContent = 'Ticket changed. Load again to read the current source.';
   $('description').textContent = ''; $('comments').replaceChildren();
@@ -90,6 +94,7 @@ function invalidateTicket() {
 $('ticket').addEventListener('input', invalidateTicket);
 $('workspace').addEventListener('change', invalidateTicket);
 $('criteria').addEventListener('input', () => {
+  cancelLoad();
   scenarios = parseGwt($('criteria').value, 'Edited / pasted criteria');
   $('criteriaSource').textContent = 'Locally edited criteria; original description and comments remain below.';
   $('sourceState').textContent = 'EDITED'; clearOutput(); render();
@@ -134,8 +139,7 @@ $('load').addEventListener('click', async () => {
     $('sourceState').textContent = 'LOAD FAILED'; error(problem.message);
     if (problem.status === 401) { auth.connected = false; showAuth(); }
   } finally {
-    // The latest load owns the button; aborted requests cannot reset a newer load.
-    if (ownVersion === version || !loaded) { $('load').disabled = false; $('load').textContent = 'Load ticket'; }
+    if (ownVersion === version) { loading = null; $('load').disabled = false; $('load').textContent = 'Load ticket'; }
   }
 });
 $('logout').addEventListener('click', async () => {

@@ -24,6 +24,7 @@ test('read-only OAuth and live Jira API flow', async t => {
       const start = new URL(url).searchParams.get('startAt');
       return Response.json({total: 2, comments: [{id: start === '0' ? '1' : '2', author: {displayName: 'QA'}, body: rich('Given guest\nWhen tap Watch\nThen Watch shown')} ]});
     }
+    if (String(url).includes('/issue/VAL-404?')) return Response.json({errorMessages: ['Not found']}, {status: 404});
     if (String(url).includes('/issue/VAL-1928?')) return Response.json({key: 'VAL-1928', names: {customfield_100: 'Acceptance Criteria'}, fields: {summary: 'Actual ticket', description: rich('Original description'), customfield_100: rich('Actual AC'), status: {name: 'Done'}, issuetype: {name: 'Story'}, attachment: []}});
     throw new Error('Unexpected outbound URL: ' + url);
   };
@@ -41,7 +42,7 @@ test('read-only OAuth and live Jira API flow', async t => {
       assert.match(session.response.headers.get('set-cookie'), /HttpOnly; Secure; SameSite=Lax/);
       assert.equal(session.callback.status, 303);
       const stored = session.callback.headers.getSetCookie();
-      assert.equal(stored.length, 3);
+      assert.equal(stored.length, 4);
       assert.ok(stored.every(value => !value.includes('test-access') && !value.includes('test-refresh')));
     });
     await t.test('callback rejects wrong state without attempting token exchange', async () => {
@@ -73,7 +74,7 @@ test('read-only OAuth and live Jira API flow', async t => {
       const bad = await worker.fetch(request('/api/auth/jira/logout', {method: 'POST', headers: {origin: 'https://evil.example'}}), env);
       assert.equal(bad.status, 403);
       const good = await worker.fetch(request('/api/auth/jira/logout', {method: 'POST', headers: {origin: env.APP_ORIGIN}}), env);
-      assert.equal(good.status, 200); assert.equal(good.headers.getSetCookie().length, 3);
+      assert.equal(good.status, 200); assert.equal(good.headers.getSetCookie().length, 4);
       assert.ok(good.headers.getSetCookie().every(value => value.includes('Max-Age=0')));
     });
     await t.test('expired access uses rotating refresh and emits both replacement cookies', async () => {
@@ -85,6 +86,44 @@ test('read-only OAuth and live Jira API flow', async t => {
         assert.equal(response.headers.getSetCookie().length, 2);
         assert.ok(calls.some(call => call.body && JSON.parse(call.body).grant_type === 'refresh_token'));
       } finally { Date.now = realNow; }
+    });
+    await t.test('refreshed cookies survive Jira errors so the browser keeps the rotated tokens', async () => {
+      const realNow = Date.now;
+      Date.now = () => realNow() + 3700 * 1000;
+      try {
+        const response = await worker.fetch(request('/api/jira/ticket?ticket=VAL-404&cloudId=cloud-1', {headers: {cookie: session.cookies}}), env);
+        assert.equal(response.status, 404);
+        const replacements = response.headers.getSetCookie();
+        assert.equal(replacements.length, 2);
+        assert.ok(replacements.some(cookie => cookie.startsWith('ff_access=')));
+        assert.ok(replacements.some(cookie => cookie.startsWith('ff_refresh=')));
+        assert.ok(replacements.every(cookie => !cookie.includes('Max-Age=0')));
+      } finally { Date.now = realNow; }
+    });
+    await t.test('late refresh cannot restore a session after logout cleared its login binding', async () => {
+      const realNow = Date.now;
+      Date.now = () => realNow() + 3700 * 1000;
+      const savedFetch = globalThis.fetch;
+      let release;
+      let reached;
+      const waiting = new Promise(resolve => { reached = resolve; });
+      globalThis.fetch = async (url, init) => {
+        if (String(url).endsWith('/me')) { reached(); await new Promise(resolve => { release = resolve; }); }
+        return savedFetch(url, init);
+      };
+      try {
+        const inFlight = worker.fetch(request('/api/auth/jira/status', {headers: {cookie: session.cookies}}), env);
+        await waiting;
+        const logout = await worker.fetch(request('/api/auth/jira/logout', {method: 'POST', headers: {origin: env.APP_ORIGIN, cookie: session.cookies}}), env);
+        assert.ok(logout.headers.getSetCookie().some(cookie => cookie.startsWith('ff_session=;')));
+        release();
+        const late = await inFlight;
+        assert.equal(late.status, 200);
+        assert.ok(late.headers.getSetCookie().every(cookie => !cookie.startsWith('ff_session=')));
+        const resurrect = await worker.fetch(request('/api/auth/jira/status', {headers: {cookie: cookieHeader(late)}}), env);
+        assert.equal(resurrect.status, 401);
+        assert.equal((await resurrect.json()).error, 'not_connected');
+      } finally { release?.(); Date.now = realNow; globalThis.fetch = savedFetch; }
     });
   } finally { globalThis.fetch = originalFetch; }
 });

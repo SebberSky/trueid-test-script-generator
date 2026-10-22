@@ -2,7 +2,6 @@ import http from 'node:http';
 import {readFile} from 'node:fs/promises';
 const worker = (await import('../dist/server/index.js')).default;
 const env = {...process.env, APP_ORIGIN: 'http://127.0.0.1:4173'};
-// Use .env only for local development; production secrets belong in Sites.
 try {
   const source = await readFile(new URL('../.env', import.meta.url), 'utf8');
   for (const line of source.split('\n')) {

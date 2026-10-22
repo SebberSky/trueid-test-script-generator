@@ -1,5 +1,4 @@
 // Atlassian tokens are encrypted with a server-only key in HttpOnly session cookies.
-// No Jira mutation endpoint is exposed by this worker.
 const SCOPES = ['read:jira-work', 'read:jira-user', 'read:me', 'read:account', 'offline_access'];
 const CALLBACK = '/api/auth/jira/callback';
 const encoder = new TextEncoder();
@@ -85,9 +84,10 @@ async function exchange(env, body) {
   if (!result.access_token || !result.expires_in) throw new AppError(502, 'invalid_oauth_response', 'Atlassian returned an invalid token response.');
   return result;
 }
-async function tokenCookies(tokens, sessionId, env, headers) {
+async function tokenCookies(tokens, sessionId, env, headers, establish = false) {
   const duration = tokens.refresh_token ? 30 * 86400 : Math.min(Number(tokens.expires_in), 86400);
   const until = Date.now() + duration * 1000;
+  if (establish) setCookie(headers, 'ff_session', sessionId, duration, env);
   const access = await seal({token: tokens.access_token, expires: Date.now() + Number(tokens.expires_in) * 1000, sessionId, until}, env, 'access');
   setCookie(headers, 'ff_access', access, duration, env);
   if (tokens.refresh_token) setCookie(headers, 'ff_refresh', await seal({token: tokens.refresh_token, sessionId, until}, env, 'refresh'), duration, env);
@@ -98,7 +98,7 @@ async function accessToken(request, env, headers) {
   configured(env);
   const jar = cookies(request);
   const access = await unseal(jar.ff_access, env, 'access');
-  if (!access) throw new AppError(401, 'not_connected', 'Log in with Jira to load a ticket.');
+  if (!access || jar.ff_session !== access.sessionId) throw new AppError(401, 'not_connected', 'Log in with Jira to load a ticket.');
   if (access.expires > Date.now() + 60000) return access.token;
   const refresh = await unseal(jar.ff_refresh, env, 'refresh');
   if (!refresh || refresh.sessionId !== access.sessionId) throw new AppError(401, 'session_expired', 'Jira session expired. Reconnect Jira.');
@@ -159,7 +159,6 @@ async function jiraTicket(request, env, headers) {
   const issue = await upstream(`${base}/issue/${ticket.key}?fields=*all&expand=names`, token);
   const comments = [];
   let start = 0;
-  // Comments often contain QA GWT tables. Consume every page, or fail explicitly.
   for (let page = 0; page < 100; page++) {
     const batch = await upstream(`${base}/issue/${ticket.key}/comment?startAt=${start}&maxResults=100&orderBy=created`, token);
     comments.push(...(batch.comments || []));
@@ -178,9 +177,8 @@ async function jiraTicket(request, env, headers) {
     fetchedAt: new Date().toISOString(),
   };
 }
-async function handle(request, env) {
+async function handle(request, env, headers) {
   const url = new URL(request.url);
-  const headers = new Headers();
   if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return new Response(PAGE, {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'}});
   if (request.method === 'GET' && ASSETS[url.pathname]) return new Response(ASSETS[url.pathname], {headers: {'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache'}});
   if (url.pathname === '/api/auth/jira/status' && request.method === 'GET') {
@@ -213,7 +211,7 @@ async function handle(request, env) {
     if (!code) return redirect('/?jira_error=missing_code', env, headers);
     try {
       const tokens = await exchange(env, {grant_type: 'authorization_code', code, redirect_uri: origin(env) + CALLBACK});
-      await tokenCookies(tokens, random(), env, headers);
+      await tokenCookies(tokens, random(), env, headers, true);
       return redirect('/?jira=connected', env, headers);
     } catch (error) {
       if (!(error instanceof AppError)) throw error;
@@ -222,7 +220,7 @@ async function handle(request, env) {
   }
   if (url.pathname === '/api/auth/jira/logout' && request.method === 'POST') {
     verifyOrigin(request, env);
-    for (const name of ['ff_access', 'ff_refresh', 'ff_oauth']) setCookie(headers, name, '', 0, env);
+    for (const name of ['ff_access', 'ff_refresh', 'ff_oauth', 'ff_session']) setCookie(headers, name, '', 0, env);
     return json({connected: false}, 200, headers);
   }
   if (url.pathname === '/api/jira/ticket' && request.method === 'GET') {
@@ -233,10 +231,11 @@ async function handle(request, env) {
 export {adfText, extractCriteria, parseTicket};
 export default {
   async fetch(request, env) {
+    const headers = new Headers();
     let response;
-    try { response = await handle(request, env); }
+    try { response = await handle(request, env, headers); }
     catch (error) {
-      response = json({error: error instanceof AppError ? error.code : 'internal_error', message: error instanceof AppError ? error.message : 'An unexpected error occurred.'}, error instanceof AppError ? error.status : 500);
+      response = json({error: error instanceof AppError ? error.code : 'internal_error', message: error instanceof AppError ? error.message : 'An unexpected error occurred.'}, error instanceof AppError ? error.status : 500, headers);
       if (response.status === 401 && env.APP_ORIGIN) for (const name of ['ff_access', 'ff_refresh']) response.headers.append('Set-Cookie', cookie(name, '', 0, env));
     }
     response.headers.set('X-Content-Type-Options', 'nosniff');

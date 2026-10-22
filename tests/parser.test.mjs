@@ -15,11 +15,31 @@ test('And and But attach to the active GWT section across multiple scenarios', (
   assert.equal(cases[0].then, 'visible\nempty');
   assert.equal(cases[1].given, 'app is open');
 });
+test('mixed text and table GWT retain every case in source order with local table row numbers', () => {
+  const cases = parseGwt('Scenario: before\nGiven first\nWhen first action\nThen first result\n\n| Given | When | Then |\n| middle | middle action | middle result |\n\nScenario: after\nGiven last\nWhen last action\nThen last result\n\n| Given | When | Then |\n| final | final action | final result |', 'Description');
+  assert.deepEqual(cases.map(flow => flow.given), ['first', 'middle', 'last', 'final']);
+  assert.deepEqual(cases.map(flow => flow.then), ['first result', 'middle result', 'last result', 'final result']);
+  assert.equal(cases[3].source, 'Description · table 2, row 1');
+});
 test('custom AC, description and comment cases retain their exact source', () => {
   const cases = ticketScenarios({acceptanceCriteria: [{id: 'customfield_1', name: 'AC', text: 'Given a\nWhen b\nThen c'}], description: '', comments: [{id: '2', author: 'QA', text: '| Given | When | Then |\n| x | y | z |'}]});
   assert.equal(cases.length, 2);
   assert.match(cases[0].source, /customfield_1/);
   assert.match(cases[1].source, /Comment 2/);
+});
+test('plain AC remains an unconfirmed draft even when comments contain existing GWT', () => {
+  const cases = ticketScenarios({acceptanceCriteria: [{id: 'customfield_1', name: 'AC', text: 'Search must support Thai text'}], comments: [{id: '2', author: 'QA', text: 'Given guest\nWhen Tap Watch\nThen Watch page is displayed'}]});
+  assert.equal(cases.length, 2);
+  assert.equal(cases[0].draft, true);
+  assert.equal(cases[0].then, 'Search must support Thai text');
+  assert.equal(cases[1].draft, false);
+});
+test('same scenario names from different sources produce unique test titles', () => {
+  const scenario = {name: 'Scenario 1', given: 'guest', when: 'Tap Watch', then: 'Watch page is displayed', source: 'AC', draft: false};
+  const output = generateScript('VAL-1', [scenario, {...scenario, source: 'Comment 2'}]);
+  const titles = [...output.code.matchAll(/\ntest\(("[^\n]+?"), async/g)].map(match => JSON.parse(match[1]));
+  assert.equal(titles.length, 2);
+  assert.equal(new Set(titles).size, 2);
 });
 test('raw AC drafts are marked unconfirmed and unsupported scripts never pretend to pass', () => {
   const drafts = draftCriteria('1. Back to top on Today\n2. Community should open');
