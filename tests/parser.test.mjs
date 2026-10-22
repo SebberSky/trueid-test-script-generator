@@ -41,6 +41,12 @@ test('same scenario names from different sources produce unique test titles', ()
   assert.equal(titles.length, 2);
   assert.equal(new Set(titles).size, 2);
 });
+test('partially structured custom AC retains prose requirements alongside parsed GWT', () => {
+  const cases = ticketScenarios({acceptanceCriteria: [{id: 'customfield_1', name: 'AC', text: 'Search must support Thai text\n\nScenario: Watch\nGiven guest\nWhen Tap Watch\nThen Watch page is displayed'}]});
+  assert.equal(cases.length, 2);
+  assert.ok(cases.some(flow => flow.draft && flow.then === 'Search must support Thai text'));
+  assert.ok(cases.some(flow => !flow.draft && flow.name === 'Watch'));
+});
 test('raw AC drafts are marked unconfirmed and unsupported scripts never pretend to pass', () => {
   const drafts = draftCriteria('1. Back to top on Today\n2. Community should open');
   assert.equal(drafts.length, 2);

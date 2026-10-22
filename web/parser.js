@@ -2,7 +2,7 @@ const clean = value => String(value || '').replace(/<br\s*\/?>/gi, '\n').replace
 function cells(line) {
   return line.trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map(value => clean(value.replace(/\\\|/g, '|')));
 }
-export function parseGwt(text, source = 'Pasted criteria') {
+export function parseGwt(text, source = 'Pasted criteria', unparsed = []) {
   const raw = String(text || '').replace(/\\n/g, '\n');
   const lines = raw.split(/\r?\n/);
   const result = [];
@@ -23,7 +23,8 @@ export function parseGwt(text, source = 'Pasted criteria') {
       const row = cells(rawLine);
       const indexes = ['given', 'when', 'then'].map(word => row.findIndex(cell => new RegExp('^' + word + '\\b', 'i').test(cell)));
       if (indexes.every(index => index >= 0)) { columns = indexes; table++; tableRow = 0; continue; }
-      if (!columns || row.every(cell => /^[-:\s]*$/.test(cell))) continue;
+      if (row.every(cell => /^[-:\s]*$/.test(cell))) continue;
+      if (!columns) { unparsed.push(clean(rawLine)); continue; }
       const [given, when, then] = columns.map(index => row[index] || '');
       if (given || when || then) {
         tableRow++;
@@ -46,6 +47,8 @@ export function parseGwt(text, source = 'Pasted criteria') {
       current[section] += (current[section] ? '\n' : '') + step[2];
     } else if (current && section && line && !/^(Feature|Examples)\s*:/i.test(line)) {
       current[section] += '\n' + line;
+    } else if (line && !/^(Feature|Examples)\s*:/i.test(line)) {
+      unparsed.push(line);
     }
   }
   finish();
@@ -60,8 +63,9 @@ export function ticketSources(ticket) {
 }
 export function ticketScenarios(ticket) {
   return ticketSources(ticket).flatMap(source => {
-    const parsed = parseGwt(source.text, source.name);
-    return parsed.length || source.kind !== 'ac' ? parsed : draftCriteria(source.text, source.name + ' · draft interpretation');
+    const unparsed = [];
+    const parsed = parseGwt(source.text, source.name, unparsed);
+    return source.kind !== 'ac' ? parsed : [...parsed, ...draftCriteria(unparsed.join('\n'), source.name + ' · draft interpretation')];
   });
 }
 export function draftCriteria(text, source = 'Acceptance criteria') {

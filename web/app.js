@@ -68,7 +68,7 @@ function render() {
       const heading = document.createElement('h4'); heading.textContent = label; step.append(heading);
       if (flow.draft) {
         const input = document.createElement('textarea'); input.value = flow[kind]; input.setAttribute('aria-label', `${label} for ${flow.name}`);
-        input.addEventListener('input', () => { flow[kind] = input.value; clearOutput(); }); step.append(input);
+        input.addEventListener('input', () => { cancelLoad(); flow[kind] = input.value; $('sourceState').textContent = 'EDITED'; clearOutput(); }); step.append(input);
       } else { const content = document.createElement('p'); content.textContent = flow[kind] || 'Not specified in source'; step.append(content); }
       grid.append(step);
     }
@@ -77,6 +77,7 @@ function render() {
     if (flow.draft) {
       const confirm = document.createElement('button'); confirm.className = 'btn'; confirm.textContent = 'Confirm this GWT draft';
       confirm.addEventListener('click', () => {
+        cancelLoad();
         if (!flow.given.trim() || !flow.when.trim() || !flow.then.trim()) { error('Fill Given, When and Then before confirming this draft.'); return; }
         flow.draft = false; flow.source += ' · user-confirmed interpretation'; clearOutput(); render(); error();
       }); card.append(confirm);

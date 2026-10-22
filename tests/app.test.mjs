@@ -7,7 +7,7 @@ import * as parser from '../web/parser.js';
 class Element {
   constructor(value = '') { this.value = value; this.textContent = ''; this.listeners = {}; this.children = []; this.classList = {add() {}, remove() {}}; }
   addEventListener(event, listener) { this.listeners[event] = listener; }
-  setAttribute() {}
+  setAttribute(name, value) { this[name] = value; }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
   emit(event) { return this.listeners[event]?.(); }
@@ -62,4 +62,40 @@ test('an obsolete load cannot reset the newest load button or overwrite its resu
   assert.equal(page.get('load').disabled, false);
   assert.equal(page.get('sourceState').textContent, 'LIVE JIRA');
   assert.match(page.get('ticketMeta').children[0].textContent, /^VAL-2/);
+});
+function findNode(root, predicate) {
+  if (predicate(root)) return root;
+  for (const child of root.children || []) { const found = findNode(child, predicate); if (found) return found; }
+}
+async function draftPage() {
+  const page = await browser();
+  const loading = page.get('load').emit('click');
+  page.pending[0].resolve(Response.json({...ticket, description: '', acceptanceCriteria: [{id: 'customfield_1', name: 'AC', text: 'Watch must open'}]}));
+  await loading;
+  return page;
+}
+test('editing a draft while reloading cancels the stale result and preserves the draft', async () => {
+  const page = await draftPage();
+  const loading = page.get('load').emit('click');
+  const card = page.get('scenarios').children[0];
+  const given = findNode(card, node => node['aria-label'] === 'Given for Draft 1');
+  given.value = 'manual guest setup'; given.emit('input');
+  page.pending[1].resolve(Response.json(ticket)); await loading;
+  assert.equal(page.get('scenarios').children[0], card);
+  assert.equal(given.value, 'manual guest setup');
+  assert.equal(page.get('sourceState').textContent, 'EDITED');
+});
+test('confirming a draft during reload prevents a stale response from replacing it', async () => {
+  const page = await draftPage();
+  const card = page.get('scenarios').children[0];
+  for (const [label, value] of [['Given', 'guest'], ['When', 'Tap Watch']]) {
+    const input = findNode(card, node => node['aria-label'] === label + ' for Draft 1');
+    input.value = value; input.emit('input');
+  }
+  const loading = page.get('load').emit('click');
+  findNode(card, node => node.textContent === 'Confirm this GWT draft').emit('click');
+  const confirmed = page.get('scenarios').children[0];
+  assert.ok(findNode(confirmed, node => node.textContent?.includes('user-confirmed interpretation')));
+  page.pending[1].resolve(Response.json(ticket)); await loading;
+  assert.equal(page.get('scenarios').children[0], confirmed);
 });
