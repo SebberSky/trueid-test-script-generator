@@ -1,4 +1,4 @@
-import {parseGwt, ticketScenarios, draftCriteria, generateScript} from './parser.js';
+import {parseGwt, ticketScenarios, draftCriteria, generateScript, formatJiraGwt} from './parser.js';
 import {renderMedia} from './media.js';
 const $ = id => document.getElementById(id);
 let auth = {connected: false, sites: []};
@@ -8,6 +8,27 @@ let loading = null;
 let version = 0;
 const toast = message => { $('toast').textContent = message; $('toast').classList.add('show'); setTimeout(() => $('toast').classList.remove('show'), 2500); };
 function error(message = '') { $('error').textContent = message; }
+async function copyJiraGwt(flows) {
+  error();
+  if (!flows.length) { error('ยังไม่มี GWT ให้คัดลอก'); return; }
+  const content = formatJiraGwt(flows);
+  const fallback = $('jiraCopyFallback'); fallback.hidden = true; fallback.value = '';
+  try {
+    if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+      try {
+        await navigator.clipboard.write([new ClipboardItem({'text/html': new Blob([content.html], {type: 'text/html'}), 'text/plain': new Blob([content.text], {type: 'text/plain'})})]);
+        toast(`คัดลอก GWT ${flows.length} เคสแล้ว — วางใน Jira editor ได้เลย`);
+        return;
+      } catch {}
+    }
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+    await navigator.clipboard.writeText(content.text);
+    toast(`คัดลอก Jira wiki format ${flows.length} เคสแล้ว — หากไม่เป็นตารางให้ใช้ editor ที่รองรับ wiki markup`);
+  } catch {
+    fallback.value = content.text; fallback.hidden = false;
+    error('Browser ไม่อนุญาต Clipboard กรุณาคัดลอก Jira format จากช่องใต้ปุ่ม Copy Jira format');
+  }
+}
 function clearOutput() { $('code').textContent = 'Generate a script from the current scenarios.'; $('generationStatus').textContent = ''; $('scriptWarnings').replaceChildren(); $('scriptWarnings').hidden = true; }
 function cancelLoad() {
   loading?.abort(); loading = null; version++;
@@ -59,10 +80,15 @@ async function refreshAuth() {
 }
 function render() {
   $('parseState').textContent = `${scenarios.length} CASES`;
+  $('copyGwt').disabled = !scenarios.length;
+  $('jiraCopyFallback').hidden = true; $('jiraCopyFallback').value = '';
   $('scenarios').replaceChildren();
   scenarios.forEach((flow, index) => {
     const card = document.createElement('article'); card.className = 'case';
     const title = document.createElement('h3'); title.textContent = `${index + 1}. ${flow.name}${flow.draft ? ' · DRAFT — review required' : ''}`; card.append(title);
+    const copyCase = document.createElement('button'); copyCase.className = 'btn copy-gwt-case'; copyCase.textContent = 'Copy Jira format';
+    copyCase.setAttribute('aria-label', `Copy Jira format for case ${index + 1}: ${flow.name}`);
+    copyCase.addEventListener('click', () => copyJiraGwt([flow])); card.append(copyCase);
     const grid = document.createElement('div'); grid.className = 'scenario';
     for (const [kind, label, cls] of [['given', 'Given', 'g'], ['when', 'When', 'w'], ['then', 'Then', 't']]) {
       const step = document.createElement('div'); step.className = 'step ' + cls;
@@ -165,6 +191,7 @@ $('copy').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText($('code').textContent); toast('Script copied'); }
   catch { error('Clipboard access was denied. Select the script and copy it manually.'); }
 });
+$('copyGwt').addEventListener('click', () => copyJiraGwt(scenarios));
 const params = new URLSearchParams(location.search);
 if (params.has('jira_error')) {
   const messages = {access_denied: 'Jira authorization was cancelled.', invalid_state: 'The login session expired or could not be verified. Try Login with Jira again.', missing_code: 'Atlassian did not return an authorization code.', oauth_exchange_failed: 'Jira OAuth token exchange failed. Check the client credentials and callback URL.'};

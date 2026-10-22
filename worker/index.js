@@ -216,9 +216,12 @@ async function attachmentContent(request, env, headers) {
   const file = (issue.fields?.attachment || []).find(file => String(file.id) === attachmentId);
   if (!file) throw new AppError(404, 'attachment_not_found', 'This attachment is not present on the authorized issue.');
   const outgoing = {Authorization: `Bearer ${token}`, Accept: '*/*', 'Accept-Encoding': 'identity', ...(range ? {Range: range} : {})};
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
   let response;
-  try { response = await fetch(`${base}/attachment/content/${attachmentId}?redirect=false`, {headers: outgoing, redirect: 'manual', signal: AbortSignal.timeout(30000)}); }
+  try { response = await fetch(`${base}/attachment/content/${attachmentId}?redirect=false`, {headers: outgoing, redirect: 'manual', signal: controller.signal}); }
   catch { throw new AppError(502, 'attachment_unavailable', 'Cannot load the attachment. Try again or open the original in Jira.'); }
+  finally { clearTimeout(timeout); }
   if (![200, 206, 416].includes(response.status)) {
     await response.body?.cancel();
     throw new AppError([401, 403, 404, 429].includes(response.status) ? response.status : 502, 'attachment_unavailable', 'Jira could not return this file. Open the original in Jira or try again.');

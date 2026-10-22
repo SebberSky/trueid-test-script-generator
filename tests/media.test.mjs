@@ -68,6 +68,9 @@ test('Jira attachments are permission-checked and streamed with range support wi
   const files = [{id: '1', filename: 'หน้าจอ.png', mimeType: 'image/png', size: 8}, {id: '2', filename: 'untrusted.svg', mimeType: 'image/svg+xml', size: 8}, {id: '3', filename: 'notes.html', mimeType: 'text/html', size: 8}];
   const original = globalThis.fetch;
   const calls = [];
+  let slowBody = false;
+  let delayedBody;
+  let bodySignal;
   globalThis.fetch = async (url, init = {}) => {
     calls.push({url: String(url), headers: init.headers, method: init.method || 'GET'});
     if (String(url).endsWith('/oauth/token')) return Response.json({access_token: 'private-token', refresh_token: 'private-refresh', expires_in: 3600});
@@ -77,6 +80,10 @@ test('Jira attachments are permission-checked and streamed with range support wi
     if (String(url).includes('redirect=true')) return new Response(null, {status: 303, headers: {location: `https://api.media.atlassian.com/file/${String(url).includes('/1?') ? uuid : '00000000-0000-0000-0000-000000000002'}/binary?token=private-signed-media-token`}});
     if (String(url).includes('/attachment/content/')) {
       assert.equal(init.redirect, 'manual'); assert.equal(init.headers['Accept-Encoding'], 'identity');
+      if (slowBody) {
+        bodySignal = init.signal;
+        return new Response(new ReadableStream({start(controller) { delayedBody = controller; init.signal.addEventListener('abort', () => controller.error(new Error('Body aborted by timeout')), {once: true}); }}));
+      }
       const ranged = init.headers.Range;
       return new Response(new Uint8Array(ranged ? [2, 3] : [0, 1, 2, 3, 4, 5, 6, 7]), {status: ranged ? 206 : 200, headers: {'Content-Length': ranged ? '2' : '8', 'Accept-Ranges': 'bytes', ...(ranged ? {'Content-Range': 'bytes 2-3/8'} : {})}});
     }
@@ -105,6 +112,33 @@ test('Jira attachments are permission-checked and streamed with range support wi
       const part = await worker.fetch(request(path + '1', {headers: {cookie: session, Range: 'bytes=2-3'}}), env);
       assert.equal(part.status, 206); assert.equal(part.headers.get('content-range'), 'bytes 2-3/8');
       assert.deepEqual([...new Uint8Array(await part.arrayBuffer())], [2, 3]);
+    });
+    await t.test('header timeout is removed before a slow attachment body streams', async () => {
+      const nativeSetTimeout = globalThis.setTimeout;
+      const nativeClearTimeout = globalThis.clearTimeout;
+      const nativeSignalTimeout = AbortSignal.timeout;
+      const timers = new Map();
+      globalThis.setTimeout = (callback, delay) => {
+        if (delay !== 30000) return nativeSetTimeout(callback, delay);
+        const id = {}; timers.set(id, callback); return id;
+      };
+      globalThis.clearTimeout = id => { if (!timers.delete(id)) nativeClearTimeout(id); };
+      AbortSignal.timeout = delay => {
+        if (delay !== 30000) return nativeSignalTimeout(delay);
+        const controller = new AbortController();
+        globalThis.setTimeout(() => controller.abort(), delay);
+        return controller.signal;
+      };
+      slowBody = true;
+      try {
+        const response = await worker.fetch(request(path + '1', {headers: {cookie: session}}), env);
+        assert.equal(response.status, 200);
+        for (const callback of timers.values()) callback();
+        assert.equal(bodySignal.aborted, false);
+        delayedBody.enqueue(new Uint8Array([1, 2, 3])); delayedBody.close();
+        assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [1, 2, 3]);
+        assert.equal(timers.size, 0);
+      } finally { slowBody = false; globalThis.setTimeout = nativeSetTimeout; globalThis.clearTimeout = nativeClearTimeout; AbortSignal.timeout = nativeSignalTimeout; }
     });
     await t.test('active document formats are downloads with sandbox and cannot execute as page scripts', async () => {
       for (const id of ['2', '3']) {

@@ -73,6 +73,19 @@ export function draftCriteria(text, source = 'Acceptance criteria') {
   return criteria.map((criterion, index) => ({name: `Draft ${index + 1}`, given: '', when: '', then: criterion, source, draft: true}));
 }
 const quote = value => JSON.stringify(String(value));
+export function formatJiraGwt(scenarios) {
+  const htmlEscape = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
+  const wikiEscape = value => String(value ?? '').replace(/\r\n?/g, '\n').replace(/[\\|[\]{}*_~^!#+-]/g, char => '\\' + char).replace(/\n/g, ' \\\\ ');
+  const columns = ['Scenario', 'Given (Test Data)', 'When (Test Steps)', 'Then (Expected Results)'];
+  const rows = scenarios.map((flow, index) => [
+    `${index + 1}. ${flow.name || 'Scenario'}${flow.draft ? ' [DRAFT — review required]' : ''}`,
+    flow.given || '', flow.when || '', flow.then || '',
+  ]);
+  return {
+    text: '|| ' + columns.join(' || ') + ' ||\n' + rows.map(row => '| ' + row.map(wikiEscape).join(' | ') + ' |').join('\n'),
+    html: '<table><thead><tr>' + columns.map(title => '<th>' + htmlEscape(title) + '</th>').join('') + '</tr></thead><tbody>' + rows.map(row => '<tr>' + row.map(value => '<td>' + htmlEscape(String(value).replace(/\r\n?/g, '\n')).replace(/\n/g, '<br>') + '</td>').join('') + '</tr>').join('') + '</tbody></table>',
+  };
+}
 export function generateScript(ticketKey, scenarios) {
   const supportedTabs = ['today', 'watch', 'privilege', 'shopping', 'home'];
   const cases = scenarios.map((flow, index) => {

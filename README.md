@@ -34,6 +34,10 @@ Existing GWT scenarios are parsed individually from AC, description, and comment
 
 Script generation uses APIs inspected in `trueid-app-v3-e2e`: `core/fixtures/screenplays.ts`, `common/component/BottomNavigation.ts`, `RootTab.ts`, and `OpenMainScreenPlayImpl.ts`. Every case is exported. Exact navigation scenarios with mapped guest/basic-login preconditions and matching tab assertions have no incomplete guard. Other cases include a visible per-case warning with what is missing and what to add, matching inline TODOs, and an `INCOMPLETE SCRIPT` error guard to remove after completion. They are not automatically skipped or allowed to pass with missing checks. Scroll-to-top is not asserted by swiping the page back up. Device execution still requires the actual E2E repository and its test environment.
 
+## Copy GWT to Jira
+
+The GWT area has Copy Jira format for all cases and for each individual case. Clipboard output includes an HTML table for rich-text editors and Jira wiki table markup as plain text. Line breaks and literal table/HTML characters are preserved, and unconfirmed cases retain a DRAFT label. When rich clipboard access is unavailable it falls back to text; when clipboard access is denied entirely, a read-only field provides the markup for manual copying. This does not write to Jira automatically.
+
 ## Jira media and files
 
 The ticket response includes every attachment plus media references discovered in description, ADF custom fields and comments. Media groups/single/inline nodes, wiki attachment references, link marks and embedded cards retain their source. Media Services UUIDs are matched to attachment IDs through server-side redirect metadata when filenames or attachment IDs do not identify a file uniquely. Unresolved references remain visible with an explicit warning and an original Jira link.
