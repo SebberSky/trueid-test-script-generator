@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {parseGwt, ticketScenarios, draftCriteria, generateScript} from '../web/parser.js';
+import {parseGwt, ticketScenarios, draftCriteria, generateScript, formatJiraGwt} from '../web/parser.js';
 test('ADF-style GWT table preserves all rows, line breaks and escaped pipes', () => {
   const cases = parseGwt('| Given(Test Data) | When(Test Steps) | Then(Expected Results) |\n| User | Open Today<br>Scroll down | Back to top |\n| Guest | Tap Watch | A \\| B |');
   assert.equal(cases.length, 2);
@@ -87,4 +87,16 @@ test('known guest and login preconditions map to OpenMain while mismatched asser
   assert.match(login.code, /openMain.execute\('basic'\)/);
   assert.equal(generateScript('VAL-1', [{...flow, then: 'Shopping page is displayed'}]).pending, 1);
   assert.equal(generateScript('VAL-1', [{...flow, given: 'premium user with expired subscription'}]).pending, 1);
+});
+test('Jira clipboard tables preserve multiline Unicode and safely escape HTML and wiki delimiters', () => {
+  const output = formatJiraGwt([{name: 'ทดสอบ | & <case>', given: 'line 1\nline 2', when: '<script>alert(1)</script>', then: 'A | B\r\nผลลัพธ์', draft: true}, {name: 'Case 2', given: '', when: 'tap', then: 'shown', draft: false}]);
+  assert.match(output.text, /^\|\| Scenario \|\| Given \(Test Data\)/);
+  assert.equal(output.text.split('\n').length, 3);
+  assert.ok(output.text.includes('line 1 \\\\ line 2'));
+  assert.ok(output.text.includes('A \\| B'));
+  assert.ok(output.html.includes('line 1<br>line 2'));
+  assert.ok(output.html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
+  assert.ok(!output.html.includes('<script>'));
+  assert.equal((output.html.match(/<tr>/g) || []).length, 3);
+  assert.equal((output.html.match(/DRAFT/g) || []).length, 1);
 });
