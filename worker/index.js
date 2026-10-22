@@ -1,0 +1,241 @@
+// Atlassian tokens are encrypted with a server-only key in HttpOnly session cookies.
+// No Jira mutation endpoint is exposed by this worker.
+const SCOPES = ['read:jira-work', 'read:jira-user', 'read:me', 'read:account', 'offline_access'];
+const CALLBACK = '/api/auth/jira/callback';
+const encoder = new TextEncoder();
+class AppError extends Error {
+  constructor(status, code, message) { super(message); this.status = status; this.code = code; }
+}
+const json = (data, status = 200, extra = new Headers()) => {
+  const headers = new Headers(extra);
+  headers.set('Content-Type', 'application/json; charset=utf-8');
+  headers.set('Cache-Control', 'no-store');
+  return new Response(JSON.stringify(data), {status, headers});
+};
+const b64 = bytes => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64 = value => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+const random = () => b64(crypto.getRandomValues(new Uint8Array(32)));
+const cookies = request => Object.fromEntries((request.headers.get('cookie') || '').split(';').map(v => v.trim().split(/=(.*)/s)).filter(v => v.length > 1));
+const origin = env => {
+  if (!env.APP_ORIGIN) throw new AppError(503, 'configuration_required', 'APP_ORIGIN is not configured.');
+  return new URL(env.APP_ORIGIN).origin;
+};
+const missing = env => ['APP_ORIGIN', 'JIRA_CLIENT_ID', 'JIRA_CLIENT_SECRET', 'SESSION_SECRET'].filter(key => !env[key]);
+function configured(env) {
+  if (missing(env).length) throw new AppError(503, 'configuration_required', 'Jira login requires production configuration: ' + missing(env).join(', '));
+  if (env.SESSION_SECRET.length < 32) throw new AppError(503, 'configuration_required', 'SESSION_SECRET must contain at least 32 characters.');
+}
+async function keyFor(env) {
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(env.SESSION_SECRET));
+  return crypto.subtle.importKey('raw', digest, 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+async function seal(value, env, purpose) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt({name: 'AES-GCM', iv, additionalData: encoder.encode(purpose + ':' + origin(env))}, await keyFor(env), encoder.encode(JSON.stringify(value)));
+  return b64(iv) + '.' + b64(new Uint8Array(ciphertext));
+}
+async function unseal(value, env, purpose) {
+  try {
+    const [iv, data] = (value || '').split('.');
+    const plain = await crypto.subtle.decrypt({name: 'AES-GCM', iv: unb64(iv), additionalData: encoder.encode(purpose + ':' + origin(env))}, await keyFor(env), unb64(data));
+    const result = JSON.parse(new TextDecoder().decode(plain));
+    return result.until > Date.now() ? result : null;
+  } catch { return null; }
+}
+function cookie(name, value, age, env) {
+  // Local HTTP is allowed only for explicit local preview origins.
+  const secure = new URL(origin(env)).protocol === 'https:' ? '; Secure' : '';
+  return `${name}=${value}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=${age}`;
+}
+function setCookie(headers, name, value, age, env) {
+  if (value.length > 3700) throw new AppError(502, 'token_too_large', 'Atlassian returned a token too large for this session.');
+  headers.append('Set-Cookie', cookie(name, value, age, env));
+}
+function redirect(path, env, headers = new Headers()) {
+  headers.set('Location', new URL(path, origin(env)).href);
+  headers.set('Cache-Control', 'no-store');
+  return new Response(null, {status: 303, headers});
+}
+async function upstream(url, token) {
+  let response;
+  try { response = await fetch(url, {headers: {Authorization: `Bearer ${token}`, Accept: 'application/json'}, signal: AbortSignal.timeout(20000), redirect: 'error'}); }
+  catch { throw new AppError(502, 'jira_unavailable', 'Cannot reach Atlassian. Try again.'); }
+  if (!response.ok) {
+    const message = {401: 'Jira session expired. Reconnect Jira.', 403: 'Your Jira account cannot read this resource.', 404: 'Ticket not found or your account does not have permission to view it.', 429: 'Jira rate limit reached. Try again shortly.'}[response.status] || 'Jira request failed.';
+    throw new AppError(response.status >= 500 ? 502 : response.status, 'jira_' + response.status, message);
+  }
+  return response.json();
+}
+async function exchange(env, body) {
+  let response;
+  try {
+    response = await fetch('https://auth.atlassian.com/oauth/token', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({client_id: env.JIRA_CLIENT_ID, client_secret: env.JIRA_CLIENT_SECRET, ...body}), signal: AbortSignal.timeout(20000),
+    });
+  } catch { throw new AppError(502, 'oauth_unavailable', 'Cannot reach Atlassian login. Try again.'); }
+  if (!response.ok) throw new AppError(401, 'oauth_exchange_failed', 'Jira authorization failed. Check OAuth credentials and reconnect.');
+  const result = await response.json();
+  if (!result.access_token || !result.expires_in) throw new AppError(502, 'invalid_oauth_response', 'Atlassian returned an invalid token response.');
+  return result;
+}
+async function tokenCookies(tokens, sessionId, env, headers) {
+  const duration = tokens.refresh_token ? 30 * 86400 : Math.min(Number(tokens.expires_in), 86400);
+  const until = Date.now() + duration * 1000;
+  const access = await seal({token: tokens.access_token, expires: Date.now() + Number(tokens.expires_in) * 1000, sessionId, until}, env, 'access');
+  setCookie(headers, 'ff_access', access, duration, env);
+  if (tokens.refresh_token) setCookie(headers, 'ff_refresh', await seal({token: tokens.refresh_token, sessionId, until}, env, 'refresh'), duration, env);
+  else setCookie(headers, 'ff_refresh', '', 0, env);
+}
+const pendingRefreshes = new Map();
+async function accessToken(request, env, headers) {
+  configured(env);
+  const jar = cookies(request);
+  const access = await unseal(jar.ff_access, env, 'access');
+  if (!access) throw new AppError(401, 'not_connected', 'Log in with Jira to load a ticket.');
+  if (access.expires > Date.now() + 60000) return access.token;
+  const refresh = await unseal(jar.ff_refresh, env, 'refresh');
+  if (!refresh || refresh.sessionId !== access.sessionId) throw new AppError(401, 'session_expired', 'Jira session expired. Reconnect Jira.');
+  let promise = pendingRefreshes.get(access.sessionId);
+  if (!promise) {
+    promise = exchange(env, {grant_type: 'refresh_token', refresh_token: refresh.token});
+    pendingRefreshes.set(access.sessionId, promise);
+  }
+  try {
+    const tokens = await promise;
+    if (!tokens.refresh_token) throw new AppError(401, 'refresh_failed', 'Reconnect Jira to renew your session.');
+    await tokenCookies(tokens, access.sessionId, env, headers);
+    return tokens.access_token;
+  } finally { pendingRefreshes.delete(access.sessionId); }
+}
+function verifyOrigin(request, env) {
+  if (request.headers.get('origin') !== origin(env)) throw new AppError(403, 'invalid_origin', 'Request origin is not allowed.');
+}
+function parseTicket(input) {
+  const raw = String(input || '').trim();
+  if (/^[A-Z][A-Z0-9_]*-\d+$/i.test(raw)) return {key: raw.toUpperCase(), hostname: null};
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' || !url.hostname.endsWith('.atlassian.net') || url.username || url.password || url.port) throw new Error();
+    const key = url.pathname.match(/^\/browse\/([A-Z][A-Z0-9_]*-\d+)\/?$/i)?.[1] || url.searchParams.get('selectedIssue');
+    if (!/^[A-Z][A-Z0-9_]*-\d+$/i.test(key || '')) throw new Error();
+    return {key: key.toUpperCase(), hostname: url.hostname};
+  } catch { throw new AppError(400, 'invalid_ticket', 'Enter a Jira key (VAL-1928) or an https://…atlassian.net/browse/VAL-1928 URL.'); }
+}
+function adfText(node) {
+  if (node == null) return '';
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) return node.map(adfText).join('');
+  if (node.type === 'text') return node.text || '';
+  if (node.type === 'hardBreak') return '\n';
+  if (node.type === 'mention') return node.attrs?.text || '';
+  if (node.type === 'inlineCard') return node.attrs?.url || '';
+  if (node.type === 'emoji') return node.attrs?.text || node.attrs?.shortName || '';
+  if (node.type === 'table') return (node.content || []).map(row => '| ' + (row.content || []).map(cell => adfText(cell).trim().replace(/\n/g, '<br>').replace(/\|/g, '\\|')).join(' | ') + ' |').join('\n') + '\n';
+  const value = (node.content || []).map(adfText).join('');
+  return value + (['paragraph', 'heading', 'listItem', 'codeBlock', 'blockquote'].includes(node.type) ? '\n' : '');
+}
+function extractCriteria(fields, names) {
+  return Object.entries(names || {}).filter(([id, name]) => /acceptance\s*criteria|acceptance\s*conditions|^ac$|เกณฑ์การยอมรับ/i.test(name) && fields[id] != null)
+    .map(([id, name]) => ({id, name, text: adfText(fields[id]).trim()})).filter(field => field.text);
+}
+async function jiraTicket(request, env, headers) {
+  const url = new URL(request.url);
+  const ticket = parseTicket(url.searchParams.get('ticket'));
+  const token = await accessToken(request, env, headers);
+  const resources = (await upstream('https://api.atlassian.com/oauth/token/accessible-resources', token)).filter(site => site.scopes?.includes('read:jira-work'));
+  const requestedCloud = url.searchParams.get('cloudId');
+  const matching = resources.filter(site => (!requestedCloud || site.id === requestedCloud) && (!ticket.hostname || new URL(site.url).hostname === ticket.hostname));
+  if (!matching.length) throw new AppError(403, 'site_not_authorized', 'This Jira site has not been authorized. Reconnect Jira and select the correct site.');
+  if (matching.length > 1) throw new AppError(400, 'choose_site', 'Select a Jira workspace or paste the full Jira URL.');
+  const site = matching[0];
+  const base = `https://api.atlassian.com/ex/jira/${encodeURIComponent(site.id)}/rest/api/3`;
+  const issue = await upstream(`${base}/issue/${ticket.key}?fields=*all&expand=names`, token);
+  const comments = [];
+  let start = 0;
+  // Comments often contain QA GWT tables. Consume every page, or fail explicitly.
+  for (let page = 0; page < 100; page++) {
+    const batch = await upstream(`${base}/issue/${ticket.key}/comment?startAt=${start}&maxResults=100&orderBy=created`, token);
+    comments.push(...(batch.comments || []));
+    start += batch.comments?.length || 0;
+    if (start >= (batch.total || 0)) break;
+    if (!batch.comments?.length || page === 99) throw new AppError(502, 'comments_incomplete', 'Could not retrieve all ticket comments. No partial ticket was loaded.');
+  }
+  const fields = issue.fields || {};
+  return {
+    key: issue.key, summary: fields.summary || '', url: `${site.url}/browse/${issue.key}`,
+    site: {id: site.id, name: site.name, url: site.url},
+    description: adfText(fields.description).trim(), acceptanceCriteria: extractCriteria(fields, issue.names),
+    comments: comments.map(comment => ({id: comment.id, author: comment.author?.displayName || '', updated: comment.updated, text: adfText(comment.body).trim()})),
+    attachments: (fields.attachment || []).map(file => ({id: file.id, filename: file.filename, mimeType: file.mimeType, size: file.size})),
+    status: fields.status?.name || '', issueType: fields.issuetype?.name || '', updated: fields.updated,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+async function handle(request, env) {
+  const url = new URL(request.url);
+  const headers = new Headers();
+  if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return new Response(PAGE, {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'}});
+  if (request.method === 'GET' && ASSETS[url.pathname]) return new Response(ASSETS[url.pathname], {headers: {'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache'}});
+  if (url.pathname === '/api/auth/jira/status' && request.method === 'GET') {
+    if (missing(env).length) return json({configured: false, connected: false, missing: missing(env)});
+    const access = await unseal(cookies(request).ff_access, env, 'access');
+    if (!access) return json({configured: true, connected: false});
+    const token = await accessToken(request, env, headers);
+    const [profile, sites] = await Promise.all([
+      upstream('https://api.atlassian.com/me', token), upstream('https://api.atlassian.com/oauth/token/accessible-resources', token),
+    ]);
+    return json({configured: true, connected: true, profile: {name: profile.name || profile.nickname || '', accountId: profile.account_id}, sites: sites.filter(site => site.scopes?.includes('read:jira-work')).map(site => ({id: site.id, name: site.name, url: site.url}))}, 200, headers);
+  }
+  if (url.pathname === '/api/auth/jira/login' && request.method === 'GET') {
+    configured(env);
+    const state = random();
+    setCookie(headers, 'ff_oauth', await seal({state, until: Date.now() + 600000}, env, 'oauth'), 600, env);
+    const authorize = new URL('https://auth.atlassian.com/authorize');
+    authorize.search = new URLSearchParams({audience: 'api.atlassian.com', client_id: env.JIRA_CLIENT_ID, scope: SCOPES.join(' '), redirect_uri: origin(env) + CALLBACK, state, response_type: 'code', prompt: 'consent'});
+    headers.set('Location', authorize.href);
+    headers.set('Cache-Control', 'no-store');
+    return new Response(null, {status: 302, headers});
+  }
+  if (url.pathname === CALLBACK && request.method === 'GET') {
+    configured(env);
+    const pending = await unseal(cookies(request).ff_oauth, env, 'oauth');
+    setCookie(headers, 'ff_oauth', '', 0, env);
+    if (!pending || !url.searchParams.get('state') || pending.state !== url.searchParams.get('state')) return redirect('/?jira_error=invalid_state', env, headers);
+    if (url.searchParams.has('error')) return redirect('/?jira_error=access_denied', env, headers);
+    const code = url.searchParams.get('code');
+    if (!code) return redirect('/?jira_error=missing_code', env, headers);
+    try {
+      const tokens = await exchange(env, {grant_type: 'authorization_code', code, redirect_uri: origin(env) + CALLBACK});
+      await tokenCookies(tokens, random(), env, headers);
+      return redirect('/?jira=connected', env, headers);
+    } catch (error) {
+      if (!(error instanceof AppError)) throw error;
+      return redirect('/?jira_error=' + error.code, env, headers);
+    }
+  }
+  if (url.pathname === '/api/auth/jira/logout' && request.method === 'POST') {
+    verifyOrigin(request, env);
+    for (const name of ['ff_access', 'ff_refresh', 'ff_oauth']) setCookie(headers, name, '', 0, env);
+    return json({connected: false}, 200, headers);
+  }
+  if (url.pathname === '/api/jira/ticket' && request.method === 'GET') {
+    return json(await jiraTicket(request, env, headers), 200, headers);
+  }
+  return json({error: 'not_found', message: 'Not found'}, 404);
+}
+export {adfText, extractCriteria, parseTicket};
+export default {
+  async fetch(request, env) {
+    let response;
+    try { response = await handle(request, env); }
+    catch (error) {
+      response = json({error: error instanceof AppError ? error.code : 'internal_error', message: error instanceof AppError ? error.message : 'An unexpected error occurred.'}, error instanceof AppError ? error.status : 500);
+      if (response.status === 401 && env.APP_ORIGIN) for (const name of ['ff_access', 'ff_refresh']) response.headers.append('Set-Cookie', cookie(name, '', 0, env));
+    }
+    response.headers.set('X-Content-Type-Options', 'nosniff');
+    response.headers.set('Referrer-Policy', 'no-referrer');
+    response.headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'");
+    return response;
+  },
+};
