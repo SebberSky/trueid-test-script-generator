@@ -58,8 +58,14 @@ function redirect(path, env, headers = new Headers()) {
 }
 async function upstream(url, token) {
   let response;
-  try { response = await fetch(url, {headers: {Authorization: `Bearer ${token}`, Accept: 'application/json'}, signal: AbortSignal.timeout(20000), redirect: 'error'}); }
-  catch { throw new AppError(502, 'jira_unavailable', 'Cannot reach Atlassian. Try again.'); }
+  try { response = await fetch(url, {headers: {Authorization: `Bearer ${token}`, Accept: 'application/json'}, signal: AbortSignal.timeout(20000), redirect: 'manual'}); }
+  catch (error) {
+    // Only log the endpoint and exception; never headers, cookies or token bodies.
+    const endpoint = new URL(url);
+    console.error(JSON.stringify({event: 'jira_transport_failed', host: endpoint.hostname, path: endpoint.pathname, type: error?.name, message: String(error?.message || '').slice(0, 250)}));
+    throw new AppError(502, 'jira_unavailable', 'Cannot reach Atlassian. Try again.');
+  }
+  if (response.status >= 300 && response.status < 400) throw new AppError(502, 'jira_redirect', 'Atlassian returned an unexpected redirect. The access token was not forwarded.');
   if (!response.ok) {
     const message = {401: 'Jira session expired. Reconnect Jira.', 403: 'Your Jira account cannot read this resource.', 404: 'Ticket not found or your account does not have permission to view it.', 429: 'Jira rate limit reached. Try again shortly.'}[response.status] || 'Jira request failed.';
     throw new AppError(response.status >= 500 ? 502 : response.status, 'jira_' + response.status, message);
