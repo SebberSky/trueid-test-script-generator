@@ -175,7 +175,10 @@ function mcpResult(id, result) { return json({jsonrpc: '2.0', id, result}); }
 function mcpError(id, code, message) { return json({jsonrpc: '2.0', id, error: {code, message}}); }
 async function mcp(request, env, headers) {
   if (request.method !== 'POST') return json({error: 'method_not_allowed', message: 'MCP uses POST.'}, 405, headers);
-  await accessToken(request, env, headers);
+  // Sites authenticates MCP callers before dispatch and forwards this identity.
+  // Direct callers still use the app's own bearer/session authentication.
+  const siteUser = request.headers.get('oai-authenticated-user-id');
+  if (!siteUser) await accessToken(request, env, headers);
   let body;
   try { body = await request.json(); } catch { return mcpError(null, -32700, 'Invalid JSON.'); }
   if (body.method === 'initialize') return mcpResult(body.id, {protocolVersion: '2025-06-18', capabilities: {tools: {}}, serverInfo: {name: 'flowforge', version: '1.0.0'}});
