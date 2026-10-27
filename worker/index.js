@@ -126,7 +126,6 @@ async function accessToken(request, env, headers) {
 async function mcpAuthorize(request, env, headers) {
   configured(env);
   const url = new URL(request.url);
-  if (url.pathname === '/mcp' && request.method === 'POST' && request.headers.get('Mcp-Method') === 'server/discover') return mcpResult(null, {supportedVersions: ['2026-07-28'], capabilities: {tools: {}}});
   const redirectUri = url.searchParams.get('redirect_uri');
   const clientId = url.searchParams.get('client_id');
   const state = url.searchParams.get('state');
@@ -144,7 +143,11 @@ async function mcpCallback(request, env, headers) {
   configured(env);
   const url = new URL(request.url);
   const pending = await unseal(url.searchParams.get('state'), env, 'mcp_oauth');
-  if (!pending) throw new AppError(400, 'invalid_state', 'MCP OAuth state expired or invalid.');
+  const jar = cookies(request);
+  const cookieState = await unseal(jar.ff_mcp_oauth, env, 'mcp_oauth');
+  if (!pending || !cookieState || JSON.stringify(pending) !== JSON.stringify(cookieState)) throw new AppError(400, 'invalid_state', 'MCP OAuth state expired or invalid.');
+  setCookie(headers, 'ff_mcp_oauth', '', 0, env);
+  if (url.searchParams.has('error') || !url.searchParams.get('code')) throw new AppError(400, 'access_denied', 'Jira authorization was cancelled.');
   const code = await seal({tokens: await exchange(env, {grant_type: 'authorization_code', code: url.searchParams.get('code'), redirect_uri: origin(env) + '/api/auth/mcp/callback'}), challenge: pending.challenge, clientId: pending.clientId, redirectUri: pending.redirectUri, until: Date.now() + 600000}, env, 'mcp_code');
   const target = new URL(pending.redirectUri); target.searchParams.set('code', code); target.searchParams.set('state', pending.state);
   headers.set('Location', target.href); headers.set('Cache-Control', 'no-store');
@@ -321,6 +324,7 @@ async function attachmentContent(request, env, headers) {
 }
 async function handle(request, env, headers) {
   const url = new URL(request.url);
+  if (url.pathname === '/mcp' && request.method === 'POST' && request.headers.get('Mcp-Method') === 'server/discover') return mcpResult(null, {supportedVersions: ['2026-07-28'], capabilities: {tools: {}}});
   if (url.pathname === '/.well-known/oauth-authorization-server' && request.method === 'GET') return json({issuer: origin(env), authorization_endpoint: origin(env) + '/oauth/authorize', token_endpoint: origin(env) + '/oauth/token', response_types_supported: ['code'], grant_types_supported: ['authorization_code'], code_challenge_methods_supported: ['S256'], scopes_supported: ['jira:read']}, 200, headers);
   if (url.pathname === '/oauth/authorize' && request.method === 'GET') return mcpAuthorize(request, env, headers);
   if (url.pathname === '/oauth/token' && request.method === 'POST') return mcpToken(request, env);
