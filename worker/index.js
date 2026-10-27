@@ -131,7 +131,9 @@ async function mcpAuthorize(request, env, headers) {
   const state = url.searchParams.get('state');
   const challenge = url.searchParams.get('code_challenge');
   if (!clientId || !redirectUri || !state || !challenge || url.searchParams.get('code_challenge_method') !== 'S256') throw new AppError(400, 'invalid_request', 'MCP OAuth requires client_id, redirect_uri, state and S256 PKCE.');
-  const callback = origin(env) + '/api/auth/mcp/callback';
+  // Atlassian only accepts the callback registered for the web login flow.
+  // Reuse that registered URI and route the MCP state separately via cookie.
+  const callback = origin(env) + CALLBACK;
   const signed = await seal({clientId, redirectUri, state, challenge, until: Date.now() + 600000}, env, 'mcp_oauth');
   setCookie(headers, 'ff_mcp_oauth', signed, 600, env);
   const authorize = new URL('https://auth.atlassian.com/authorize');
@@ -139,7 +141,7 @@ async function mcpAuthorize(request, env, headers) {
   headers.set('Location', authorize.href); headers.set('Cache-Control', 'no-store');
   return new Response(null, {status: 302, headers});
 }
-async function mcpCallback(request, env, headers) {
+async function mcpCallback(request, env, headers, callback = '/api/auth/mcp/callback') {
   configured(env);
   const url = new URL(request.url);
   const pending = await unseal(url.searchParams.get('state'), env, 'mcp_oauth');
@@ -148,7 +150,7 @@ async function mcpCallback(request, env, headers) {
   if (!pending || !cookieState || JSON.stringify(pending) !== JSON.stringify(cookieState)) throw new AppError(400, 'invalid_state', 'MCP OAuth state expired or invalid.');
   setCookie(headers, 'ff_mcp_oauth', '', 0, env);
   if (url.searchParams.has('error') || !url.searchParams.get('code')) throw new AppError(400, 'access_denied', 'Jira authorization was cancelled.');
-  const code = await seal({tokens: await exchange(env, {grant_type: 'authorization_code', code: url.searchParams.get('code'), redirect_uri: origin(env) + '/api/auth/mcp/callback'}), challenge: pending.challenge, clientId: pending.clientId, redirectUri: pending.redirectUri, until: Date.now() + 600000}, env, 'mcp_code');
+  const code = await seal({tokens: await exchange(env, {grant_type: 'authorization_code', code: url.searchParams.get('code'), redirect_uri: origin(env) + callback}), challenge: pending.challenge, clientId: pending.clientId, redirectUri: pending.redirectUri, until: Date.now() + 600000}, env, 'mcp_code');
   const target = new URL(pending.redirectUri); target.searchParams.set('code', code); target.searchParams.set('state', pending.state);
   headers.set('Location', target.href); headers.set('Cache-Control', 'no-store');
   return new Response(null, {status: 302, headers});
@@ -398,6 +400,7 @@ async function handle(request, env, headers) {
     headers.set('Cache-Control', 'no-store');
     return new Response(null, {status: 302, headers});
   }
+  if (url.pathname === CALLBACK && request.method === 'GET' && cookies(request).ff_mcp_oauth) return mcpCallback(request, env, headers, CALLBACK);
   if (url.pathname === CALLBACK && request.method === 'GET') {
     configured(env);
     const pending = await unseal(cookies(request).ff_oauth, env, 'oauth');
