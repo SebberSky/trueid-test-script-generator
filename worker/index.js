@@ -201,6 +201,58 @@ function verifyOrigin(request, env) {
   if (request.headers.get('origin') !== origin(env)) throw new AppError(403, 'invalid_origin', 'Request origin is not allowed.');
 }
 
+const MCP_INSTRUCTIONS = [
+  'This cloud MCP is Jira + GWT + script draft only. It cannot reach your iOS Simulator.',
+  'Simulator a11y scan / path explore requires a second local MCP: flowforge-local-sim.',
+  'Call get_sim_scan_setup for Cursor mcp.json snippet, required tools, and docs URL.',
+].join(' ');
+
+function simScanSetup(env) {
+  const docsUrl = origin(env) + '/mcp-docs';
+  const repoUrl = 'https://github.com/SebberSky/trueid-test-script-generator';
+  const snippet = {
+    'flowforge-local-sim': {
+      command: '/opt/homebrew/bin/node',
+      args: [
+        '<PATH_TO_trueid-ios-v3>/trueid-v3-uitest/scripts/flowforge_local_mcp.mjs',
+      ],
+      env: {
+        FLOWFORGE_LOCAL_MCP_VERSION: '0.3.2',
+        PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+      },
+    },
+  };
+  return {
+    whySeparate: 'Cloud MCP has no access to your Mac Simulator. Scan must run as a local stdio MCP beside this cloud MCP.',
+    docsUrl,
+    repoUrl,
+    localSimDocsInRepo: 'local-sim/README.md',
+    prerequisites: [
+      'Booted iOS Simulator with TrueID Preprod installed',
+      'mobilecli + on-device agent',
+      'Checkout of trueid-ios-v3 (or worktree) that includes trueid-v3-uitest/scripts/flowforge_local_mcp.mjs',
+      'Node at /opt/homebrew/bin/node (or edit command path)',
+    ],
+    cursorMcpJsonSnippet: snippet,
+    localTools: [
+      'scan_accessibility_ids',
+      'explore_sim_paths',
+      'generate_helpers_from_a11y',
+      'generate_test_script (share-first; scan only on gaps)',
+      'enrich_flowforge_script',
+      'setup_environment',
+      'list_simulators',
+      'launch_trueid',
+    ],
+    workflow: [
+      'Keep flowforge-mobilewright (this cloud URL) for Jira/GWT.',
+      'Add flowforge-local-sim from cursorMcpJsonSnippet (replace PATH_TO_trueid-ios-v3).',
+      'Restart Cursor MCP until flowforge-local-sim is ready.',
+      'Call scan_accessibility_ids or explore_sim_paths when you need live a11y/paths.',
+    ],
+  };
+}
+
 const MCP_TOOLS = [
   {name: 'connect_jira', description: 'Create a Jira OAuth link for the authenticated MCP user. Open the link once, then call Jira tools again.', inputSchema: {type: 'object', properties: {}}},
   {name: 'load_jira_ticket', description: 'Load a Jira ticket using the connected user Jira account.', inputSchema: {type: 'object', properties: {ticket: {type: 'string'}, cloudId: {type: 'string'}}, required: ['ticket']}},
@@ -208,6 +260,7 @@ const MCP_TOOLS = [
   {name: 'generate_test_script', description: 'Generate a Mobilewright test script from scenarios.', inputSchema: {type: 'object', properties: {ticketKey: {type: 'string'}, scenarios: {type: 'array'}}, required: ['scenarios']}},
   {name: 'format_jira_gwt', description: 'Format scenarios as Jira wiki text and HTML.', inputSchema: {type: 'object', properties: {scenarios: {type: 'array'}}, required: ['scenarios']}},
   {name: 'business_to_qa_detail', description: 'แปลง Business Expectation/GWT เป็น QA Execution Detail ภาษาไทยแบบละเอียด พร้อม precondition, test data, steps, expected result, evidence, edge case และ open questions.', inputSchema: {type: 'object', properties: {ticketKey: {type: 'string'}, businessExpectation: {type: 'string'}, comments: {type: 'string'}}, required: ['businessExpectation']}},
+  {name: 'get_sim_scan_setup', description: 'How to enable Simulator a11y scan / path explore. Cloud MCP cannot scan a Mac Simulator — returns Cursor mcp.json snippet for the separate local flowforge-local-sim MCP plus prerequisites and tool names.', inputSchema: {type: 'object', properties: {}}},
 ];
 function mcpResult(id, result) { return json({jsonrpc: '2.0', id, result}); }
 function mcpError(id, code, message) { return json({jsonrpc: '2.0', id, error: {code, message}}); }
@@ -219,7 +272,14 @@ async function mcp(request, env, headers) {
   if (!siteUser) await accessToken(request, env, headers);
   let body;
   try { body = await request.json(); } catch { return mcpError(null, -32700, 'Invalid JSON.'); }
-  if (body.method === 'initialize') return mcpResult(body.id, {protocolVersion: '2025-06-18', capabilities: {tools: {}}, serverInfo: {name: 'flowforge', version: '1.0.0'}});
+  if (body.method === 'initialize') {
+    return mcpResult(body.id, {
+      protocolVersion: '2025-06-18',
+      capabilities: {tools: {}},
+      serverInfo: {name: 'flowforge', version: '1.1.0'},
+      instructions: MCP_INSTRUCTIONS,
+    });
+  }
   if (body.method === 'notifications/initialized') return new Response(null, {status: 202, headers});
   if (body.method === 'tools/list') return mcpResult(body.id, {tools: MCP_TOOLS});
   if (body.method !== 'tools/call') return mcpError(body.id, -32601, 'Method not found.');
@@ -237,6 +297,10 @@ async function mcp(request, env, headers) {
     if (name === 'generate_test_script') return mcpResult(body.id, {content: [{type: 'text', text: generateScript(args.ticketKey || 'MCP', args.scenarios || []).code}], structuredContent: generateScript(args.ticketKey || 'MCP', args.scenarios || [])});
     if (name === 'format_jira_gwt') return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(formatJiraGwt(args.scenarios || []))}], structuredContent: formatJiraGwt(args.scenarios || [])});
     if (name === 'business_to_qa_detail') { const result = businessToQaDetail(args); return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(result, null, 2)}], structuredContent: result}); }
+    if (name === 'get_sim_scan_setup') {
+      const result = simScanSetup(env);
+      return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(result, null, 2)}], structuredContent: result});
+    }
     if (name === 'load_jira_ticket') {
       const url = new URL(request.url); url.pathname = '/api/jira/ticket'; url.search = new URLSearchParams({ticket: args.ticket, ...(args.cloudId ? {cloudId: args.cloudId} : {})}).toString();
       const token = siteUser ? await jiraTokenForSiteUser(request, env, headers) : null;
