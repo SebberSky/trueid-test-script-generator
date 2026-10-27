@@ -1,4 +1,6 @@
 import {collectMedia, mediaInventory, inlineMime} from './media.js';
+import {parseGwt, generateScript, formatJiraGwt} from './parser.js';
+import {businessToQaDetail} from './qa.js';
 // Atlassian tokens are encrypted with a server-only key in HttpOnly session cookies.
 const SCOPES = ['read:jira-work', 'read:jira-user', 'read:me', 'read:account', 'offline_access'];
 const CALLBACK = '/api/auth/jira/callback';
@@ -97,6 +99,12 @@ async function tokenCookies(tokens, sessionId, env, headers, establish = false) 
 const pendingRefreshes = new Map();
 async function accessToken(request, env, headers) {
   configured(env);
+  const bearer = request.headers.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (bearer) {
+    const session = await unseal(bearer, env, 'mcp_access');
+    if (!session?.token) throw new AppError(401, 'invalid_token', 'MCP authorization token is invalid or expired.');
+    return session.token;
+  }
   const jar = cookies(request);
   const access = await unseal(jar.ff_access, env, 'access');
   if (!access || jar.ff_session !== access.sessionId) throw new AppError(401, 'not_connected', 'Log in with Jira to load a ticket.');
@@ -115,8 +123,130 @@ async function accessToken(request, env, headers) {
     return tokens.access_token;
   } finally { pendingRefreshes.delete(access.sessionId); }
 }
+
+async function mcpAuthorize(request, env, headers) {
+  configured(env);
+  const url = new URL(request.url);
+  const redirectUri = url.searchParams.get('redirect_uri');
+  const clientId = url.searchParams.get('client_id');
+  const state = url.searchParams.get('state');
+  const challenge = url.searchParams.get('code_challenge');
+  if (!clientId || !redirectUri || !state || !challenge || url.searchParams.get('code_challenge_method') !== 'S256') throw new AppError(400, 'invalid_request', 'MCP OAuth requires client_id, redirect_uri, state and S256 PKCE.');
+  // Atlassian only accepts the callback registered for the web login flow.
+  // Reuse that registered URI and route the MCP state separately via cookie.
+  const callback = origin(env) + CALLBACK;
+  const signed = await seal({clientId, redirectUri, state, challenge, until: Date.now() + 600000}, env, 'mcp_oauth');
+  setCookie(headers, 'ff_mcp_oauth', signed, 600, env);
+  const authorize = new URL('https://auth.atlassian.com/authorize');
+  authorize.search = new URLSearchParams({audience: 'api.atlassian.com', client_id: env.JIRA_CLIENT_ID, scope: SCOPES.join(' '), redirect_uri: callback, state: signed, response_type: 'code', prompt: 'consent'});
+  headers.set('Location', authorize.href); headers.set('Cache-Control', 'no-store');
+  return new Response(null, {status: 302, headers});
+}
+async function mcpCallback(request, env, headers, callback = '/api/auth/mcp/callback') {
+  configured(env);
+  const url = new URL(request.url);
+  const pending = await unseal(url.searchParams.get('state'), env, 'mcp_oauth');
+  const jar = cookies(request);
+  const cookieState = await unseal(jar.ff_mcp_oauth, env, 'mcp_oauth');
+  if (!pending || !cookieState || JSON.stringify(pending) !== JSON.stringify(cookieState)) throw new AppError(400, 'invalid_state', 'MCP OAuth state expired or invalid.');
+  setCookie(headers, 'ff_mcp_oauth', '', 0, env);
+  if (url.searchParams.has('error') || !url.searchParams.get('code')) throw new AppError(400, 'access_denied', 'Jira authorization was cancelled.');
+  const code = await seal({tokens: await exchange(env, {grant_type: 'authorization_code', code: url.searchParams.get('code'), redirect_uri: origin(env) + callback}), challenge: pending.challenge, clientId: pending.clientId, redirectUri: pending.redirectUri, until: Date.now() + 600000}, env, 'mcp_code');
+  const target = new URL(pending.redirectUri); target.searchParams.set('code', code); target.searchParams.set('state', pending.state);
+  headers.set('Location', target.href); headers.set('Cache-Control', 'no-store');
+  return new Response(null, {status: 302, headers});
+}
+async function mcpToken(request, env) {
+  configured(env);
+  const body = await request.formData();
+  const record = await unseal(body.get('code'), env, 'mcp_code');
+  if (!record || record.clientId !== body.get('client_id') || record.redirectUri !== body.get('redirect_uri')) throw new AppError(400, 'invalid_grant', 'Authorization code is invalid.');
+  const verifier = String(body.get('code_verifier') || '');
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(verifier));
+  if (b64(new Uint8Array(digest)) !== record.challenge) throw new AppError(400, 'invalid_grant', 'PKCE verification failed.');
+  const access = await seal({token: record.tokens.access_token, until: Date.now() + Math.min(Number(record.tokens.expires_in), 3600) * 1000}, env, 'mcp_access');
+  return json({access_token: access, token_type: 'Bearer', expires_in: Math.min(Number(record.tokens.expires_in), 3600), scope: 'jira:read'});
+}
+async function mcpRegister(request) {
+  const body = await request.json().catch(() => ({}));
+  return json({client_id: 'flowforge-' + random().slice(0, 22), client_id_issued_at: Math.floor(Date.now() / 1000), redirect_uris: body.redirect_uris || [], token_endpoint_auth_method: 'none', grant_types: ['authorization_code'], response_types: ['code'], scope: 'jira:read'});
+}
+function siteUserId(request) { return request.headers.get('oai-authenticated-user-id') || ''; }
+async function saveJiraForUser(env, userId, tokens) {
+  if (!env.DB) throw new AppError(503, 'storage_unavailable', 'Jira MCP connection storage is not configured.');
+  await env.DB.prepare('INSERT INTO jira_mcp_tokens (user_id, access_token, refresh_token, access_expires_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET access_token=excluded.access_token, refresh_token=excluded.refresh_token, access_expires_at=excluded.access_expires_at, updated_at=excluded.updated_at').bind(userId, tokens.access_token, tokens.refresh_token || null, Date.now() + Number(tokens.expires_in) * 1000, Date.now()).run();
+}
+async function jiraTokenForSiteUser(request, env, headers) {
+  const userId = siteUserId(request);
+  if (!userId || !env.DB) throw new AppError(401, 'jira_not_connected', 'Connect Jira before loading a Jira ticket. Call connect_jira first.');
+  const row = await env.DB.prepare('SELECT access_token, refresh_token, access_expires_at FROM jira_mcp_tokens WHERE user_id = ?').bind(userId).first();
+  if (!row) throw new AppError(401, 'jira_not_connected', 'Connect Jira before loading a Jira ticket. Call connect_jira first.');
+  if (Number(row.access_expires_at) > Date.now() + 60000) return row.access_token;
+  if (!row.refresh_token) throw new AppError(401, 'jira_session_expired', 'Reconnect Jira with connect_jira.');
+  const tokens = await exchange(env, {grant_type: 'refresh_token', refresh_token: row.refresh_token});
+  await saveJiraForUser(env, userId, tokens);
+  return tokens.access_token;
+}
+async function mcpSiteJiraCallback(request, env, headers) {
+  configured(env);
+  const url = new URL(request.url);
+  const pending = await unseal(url.searchParams.get('state'), env, 'mcp_site_jira');
+  if (!pending) throw new AppError(400, 'invalid_state', 'Jira connection state is invalid or expired.');
+  if (url.searchParams.has('error') || !url.searchParams.get('code')) throw new AppError(400, 'access_denied', 'Jira authorization was cancelled.');
+  const tokens = await exchange(env, {grant_type: 'authorization_code', code: url.searchParams.get('code'), redirect_uri: origin(env) + '/api/auth/mcp/jira-callback'});
+  await saveJiraForUser(env, pending.userId, tokens);
+  return new Response('<!doctype html><meta charset="utf-8"><title>Jira connected</title><p>Jira connected. You can close this window and return to your MCP client.</p>', {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'}});
+}
 function verifyOrigin(request, env) {
   if (request.headers.get('origin') !== origin(env)) throw new AppError(403, 'invalid_origin', 'Request origin is not allowed.');
+}
+
+const MCP_TOOLS = [
+  {name: 'connect_jira', description: 'Create a Jira OAuth link for the authenticated MCP user. Open the link once, then call Jira tools again.', inputSchema: {type: 'object', properties: {}}},
+  {name: 'load_jira_ticket', description: 'Load a Jira ticket using the connected user Jira account.', inputSchema: {type: 'object', properties: {ticket: {type: 'string'}, cloudId: {type: 'string'}}, required: ['ticket']}},
+  {name: 'parse_gwt', description: 'Parse Gherkin/GWT text into test scenarios.', inputSchema: {type: 'object', properties: {text: {type: 'string'}, source: {type: 'string'}}, required: ['text']}},
+  {name: 'generate_test_script', description: 'Generate a Mobilewright test script from scenarios.', inputSchema: {type: 'object', properties: {ticketKey: {type: 'string'}, scenarios: {type: 'array'}}, required: ['scenarios']}},
+  {name: 'format_jira_gwt', description: 'Format scenarios as Jira wiki text and HTML.', inputSchema: {type: 'object', properties: {scenarios: {type: 'array'}}, required: ['scenarios']}},
+  {name: 'business_to_qa_detail', description: 'แปลง Business Expectation/GWT เป็น QA Execution Detail ภาษาไทยแบบละเอียด พร้อม precondition, test data, steps, expected result, evidence, edge case และ open questions.', inputSchema: {type: 'object', properties: {ticketKey: {type: 'string'}, businessExpectation: {type: 'string'}, comments: {type: 'string'}}, required: ['businessExpectation']}},
+];
+function mcpResult(id, result) { return json({jsonrpc: '2.0', id, result}); }
+function mcpError(id, code, message) { return json({jsonrpc: '2.0', id, error: {code, message}}); }
+async function mcp(request, env, headers) {
+  if (request.method !== 'POST') return json({error: 'method_not_allowed', message: 'MCP uses POST.'}, 405, headers);
+  // Sites authenticates MCP callers before dispatch and forwards this identity.
+  // Direct callers still use the app's own bearer/session authentication.
+  const siteUser = request.headers.get('oai-authenticated-user-id');
+  if (!siteUser) await accessToken(request, env, headers);
+  let body;
+  try { body = await request.json(); } catch { return mcpError(null, -32700, 'Invalid JSON.'); }
+  if (body.method === 'initialize') return mcpResult(body.id, {protocolVersion: '2025-06-18', capabilities: {tools: {}}, serverInfo: {name: 'flowforge', version: '1.0.0'}});
+  if (body.method === 'notifications/initialized') return new Response(null, {status: 202, headers});
+  if (body.method === 'tools/list') return mcpResult(body.id, {tools: MCP_TOOLS});
+  if (body.method !== 'tools/call') return mcpError(body.id, -32601, 'Method not found.');
+  const name = body.params?.name;
+  const args = body.params?.arguments || {};
+  try {
+    if (name === 'connect_jira') {
+      if (!siteUser) throw new AppError(401, 'mcp_identity_required', 'Connect Jira must be called from an authenticated Sites MCP session.');
+      const state = await seal({userId: siteUser, until: Date.now() + 600000}, env, 'mcp_site_jira');
+      const authorize = new URL('https://auth.atlassian.com/authorize');
+      authorize.search = new URLSearchParams({audience: 'api.atlassian.com', client_id: env.JIRA_CLIENT_ID, scope: SCOPES.join(' '), redirect_uri: origin(env) + '/api/auth/mcp/jira-callback', state, response_type: 'code', prompt: 'consent'});
+      return mcpResult(body.id, {content: [{type: 'text', text: `Open this Jira authorization URL, approve read-only access, then call load_jira_ticket again: ${authorize.href}`}], structuredContent: {authorizationUrl: authorize.href}});
+    }
+    if (name === 'parse_gwt') return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(parseGwt(args.text, args.source || 'MCP input'))}], structuredContent: {scenarios: parseGwt(args.text, args.source || 'MCP input')}});
+    if (name === 'generate_test_script') return mcpResult(body.id, {content: [{type: 'text', text: generateScript(args.ticketKey || 'MCP', args.scenarios || []).code}], structuredContent: generateScript(args.ticketKey || 'MCP', args.scenarios || [])});
+    if (name === 'format_jira_gwt') return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(formatJiraGwt(args.scenarios || []))}], structuredContent: formatJiraGwt(args.scenarios || [])});
+    if (name === 'business_to_qa_detail') { const result = businessToQaDetail(args); return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(result, null, 2)}], structuredContent: result}); }
+    if (name === 'load_jira_ticket') {
+      const url = new URL(request.url); url.pathname = '/api/jira/ticket'; url.search = new URLSearchParams({ticket: args.ticket, ...(args.cloudId ? {cloudId: args.cloudId} : {})}).toString();
+      const token = siteUser ? await jiraTokenForSiteUser(request, env, headers) : null;
+      const toolHeaders = new Headers(request.headers);
+      if (token) toolHeaders.set('authorization', 'Bearer ' + await seal({token, until: Date.now() + 3600000}, env, 'mcp_access'));
+      const ticket = await jiraTicket(new Request(url, {headers: toolHeaders}), env, headers);
+      return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(ticket)}], structuredContent: ticket});
+    }
+    return mcpError(body.id, -32602, 'Unknown tool.');
+  } catch (error) { return mcpError(body.id, error.status === 401 ? -32001 : -32000, error.message || 'Tool failed.'); }
 }
 function parseTicket(input) {
   const raw = String(input || '').trim();
@@ -240,6 +370,17 @@ async function attachmentContent(request, env, headers) {
 }
 async function handle(request, env, headers) {
   const url = new URL(request.url);
+  if (url.pathname === '/mcp' && request.method === 'POST' && request.headers.get('Mcp-Method') === 'server/discover') return mcpResult(null, {supportedVersions: ['2026-07-28'], capabilities: {tools: {}}});
+  if ((url.pathname === '/.well-known/oauth-authorization-server' || url.pathname === '/.well-known/oauth-authorization-server/api/mcp') && request.method === 'GET') return json({issuer: origin(env), authorization_endpoint: origin(env) + '/oauth/authorize', token_endpoint: origin(env) + '/oauth/token', registration_endpoint: origin(env) + '/oauth/register', response_types_supported: ['code'], grant_types_supported: ['authorization_code'], code_challenge_methods_supported: ['S256'], scopes_supported: ['jira:read']}, 200, headers);
+  if ((url.pathname === '/.well-known/oauth-protected-resource/api/mcp' || url.pathname === '/.well-known/oauth-protected-resource') && request.method === 'GET') return json({resource: origin(env) + '/api/mcp', authorization_servers: [origin(env)], bearer_methods_supported: ['header'], scopes_supported: ['jira:read']}, 200, headers);
+  if (url.pathname === '/oauth/register' && request.method === 'POST') return mcpRegister(request);
+  if (url.pathname === '/oauth/authorize' && request.method === 'GET') return mcpAuthorize(request, env, headers);
+  if (url.pathname === '/oauth/token' && request.method === 'POST') return mcpToken(request, env);
+  if (url.pathname === '/api/auth/mcp/callback' && request.method === 'GET') return mcpCallback(request, env, headers);
+  if (url.pathname === '/api/auth/mcp/jira-callback' && request.method === 'GET') return mcpSiteJiraCallback(request, env, headers);
+  if (url.pathname === '/.well-known/oauth-protected-resource/mcp' && request.method === 'GET') return json({resource: origin(env) + '/mcp', authorization_servers: [origin(env)], bearer_methods_supported: ['header'], scopes_supported: ['jira:read']}, 200, headers);
+  if (url.pathname === '/mcp' || url.pathname === '/api/mcp') return mcp(request, env, headers);
+  if (request.method === 'GET' && url.pathname === '/mcp-docs') return new Response(MCP_DOCS, {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'}});
   if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return new Response(PAGE, {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'}});
   if (request.method === 'GET' && ASSETS[url.pathname]) return new Response(ASSETS[url.pathname], {headers: {'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache'}});
   if (url.pathname === '/api/auth/jira/status' && request.method === 'GET') {
@@ -262,6 +403,7 @@ async function handle(request, env, headers) {
     headers.set('Cache-Control', 'no-store');
     return new Response(null, {status: 302, headers});
   }
+  if (url.pathname === CALLBACK && request.method === 'GET' && cookies(request).ff_mcp_oauth) return mcpCallback(request, env, headers, CALLBACK);
   if (url.pathname === CALLBACK && request.method === 'GET') {
     configured(env);
     const pending = await unseal(cookies(request).ff_oauth, env, 'oauth');
@@ -298,6 +440,7 @@ export default {
     try { response = await handle(request, env, headers); }
     catch (error) {
       response = json({error: error instanceof AppError ? error.code : 'internal_error', message: error instanceof AppError ? error.message : 'An unexpected error occurred.'}, error instanceof AppError ? error.status : 500, headers);
+      if (response.status === 401 && new URL(request.url).pathname === '/api/mcp') response.headers.set('WWW-Authenticate', `Bearer resource_metadata="${origin(env)}/.well-known/oauth-protected-resource/api/mcp", scope="jira:read"`);
       if (response.status === 401 && env.APP_ORIGIN) for (const name of ['ff_access', 'ff_refresh']) response.headers.append('Set-Cookie', cookie(name, '', 0, env));
     }
     response.headers.set('X-Content-Type-Options', 'nosniff');
