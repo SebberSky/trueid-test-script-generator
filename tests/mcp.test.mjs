@@ -41,7 +41,7 @@ test('MCP discovery, PKCE Jira login, token exchange and tools', async () => {
     assert.equal((await initialized.json()).result.serverInfo.name, 'flowforge');
     const listed = await worker.fetch(request('/mcp', {method: 'POST', headers: {'content-type': 'application/json', authorization: `Bearer ${tokenData.access_token}`}, body: JSON.stringify({jsonrpc: '2.0', id: 2, method: 'tools/list', params: {}})}), env);
     const names = (await listed.json()).result.tools.map(tool => tool.name);
-    assert.deepEqual(names, ['load_jira_ticket', 'parse_gwt', 'generate_test_script', 'format_jira_gwt']);
+    assert.deepEqual(names, ['connect_jira', 'load_jira_ticket', 'parse_gwt', 'generate_test_script', 'format_jira_gwt']);
   } finally { globalThis.fetch = originalFetch; }
 });
 
