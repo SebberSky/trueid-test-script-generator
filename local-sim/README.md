@@ -47,9 +47,19 @@ Simulator a11y scan and path explore run as a **second** Cursor MCP: `flowforge-
 
 Anyone already connected to cloud Flowforge can call:
 
-`get_sim_scan_setup`
+1. `get_sim_scan_setup` — mcp.json snippet + prerequisites  
+2. `prepare_local_gen` — after `parse_gwt`, returns **exact** local tool + arguments
 
-That tool returns the same snippet + prerequisites so the agent knows scan is a separate local MCP.
+### Agent pipeline
+
+```
+cloud: load_jira_ticket → parse_gwt → prepare_local_gen
+local:  call nextLocalCall.tool with nextLocalCall.arguments
+        → trueid-v3-uitest/tests/generated_mcp/<ticket>.spec.ts
+```
+
+If `prepare_local_gen` chooses `enrich_flowforge_script`, pass the cloud draft as `flowforgeScript`.  
+Local gen is share-first (`explore: auto`); it scans only when stuck.
 
 ## Why two MCPs
 

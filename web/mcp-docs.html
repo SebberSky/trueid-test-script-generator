@@ -31,7 +31,16 @@
 <li><code>format_jira_gwt</code> — Jira wiki / HTML table</li>
 <li><code>business_to_qa_detail</code> — QA execution detail ภาษาไทย</li>
 <li><code>get_sim_scan_setup</code> — วิธีเปิด Simulator scan (local MCP)</li>
+<li><code>prepare_local_gen</code> — สร้าง handoff (tool + arguments) ให้ไปเรียก local gen เขียน <code>tests/generated_mcp/</code></li>
 </ul>
+
+<h2>Pipeline ที่แนะนำ</h2>
+<ol>
+<li>Cloud: <code>load_jira_ticket</code> → <code>parse_gwt</code></li>
+<li>Cloud (optional): <code>generate_test_script</code> ได้แค่ draft</li>
+<li>Cloud: <code>prepare_local_gen</code> ด้วย scenarios (+ draft ถ้ามี)</li>
+<li>Local: เรียก <code>nextLocalCall.tool</code> ตาม handoff บน <code>flowforge-local-sim</code></li>
+</ol>
 
 <h2>Local tools (หลังติดตั้ง flowforge-local-sim)</h2>
 <ul>
