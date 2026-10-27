@@ -52,8 +52,8 @@ This feature presents and downloads media. It does not perform OCR, vision infer
 
 Two MCP surfaces:
 
-1. **Cloud** (`/api/mcp`) — Jira OAuth, load ticket, parse GWT, draft Mobilewright script, `get_sim_scan_setup`. Docs: `/mcp` (`web/mcp-docs.html`).
-2. **Local Simulator** — a11y scan / path explore on your Mac. Not runnable in the cloud worker. Setup: [`local-sim/README.md`](local-sim/README.md) or call cloud tool `get_sim_scan_setup`.
+1. **Cloud** (`/api/mcp`) — Jira OAuth, load ticket, parse GWT, draft script, `get_sim_scan_setup`, **`prepare_local_gen`** (handoff → local gen). Docs: `/mcp-docs`.
+2. **Local Simulator** — a11y scan / path explore / runnable `trueid-v3-uitest` specs on your Mac. Setup: [`local-sim/README.md`](local-sim/README.md). Pipeline: cloud `prepare_local_gen` → local `generate_test_script` / `enrich_flowforge_script`.
 
 ## Publishing
 

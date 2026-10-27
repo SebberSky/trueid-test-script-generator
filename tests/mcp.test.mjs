@@ -44,11 +44,18 @@ test('MCP discovery, PKCE Jira login, token exchange and tools', async () => {
     assert.match(String(initBody.result.instructions || ''), /flowforge-local-sim/);
     const listed = await worker.fetch(request('/mcp', {method: 'POST', headers: {'content-type': 'application/json', authorization: `Bearer ${tokenData.access_token}`}, body: JSON.stringify({jsonrpc: '2.0', id: 2, method: 'tools/list', params: {}})}), env);
     const names = (await listed.json()).result.tools.map(tool => tool.name);
-    assert.deepEqual(names, ['connect_jira', 'load_jira_ticket', 'parse_gwt', 'generate_test_script', 'format_jira_gwt', 'business_to_qa_detail', 'get_sim_scan_setup']);
+    assert.deepEqual(names, ['connect_jira', 'load_jira_ticket', 'parse_gwt', 'generate_test_script', 'format_jira_gwt', 'business_to_qa_detail', 'get_sim_scan_setup', 'prepare_local_gen']);
     const setup = await worker.fetch(request('/mcp', {method: 'POST', headers: {'content-type': 'application/json', authorization: `Bearer ${tokenData.access_token}`}, body: JSON.stringify({jsonrpc: '2.0', id: 3, method: 'tools/call', params: {name: 'get_sim_scan_setup', arguments: {}}})}), env);
     assert.equal(setup.status, 200);
     const setupBody = await setup.json();
     assert.match(setupBody.result.content[0].text, /flowforge-local-sim/);
+    const handoff = await worker.fetch(request('/mcp', {method: 'POST', headers: {'content-type': 'application/json', authorization: `Bearer ${tokenData.access_token}`}, body: JSON.stringify({jsonrpc: '2.0', id: 4, method: 'tools/call', params: {name: 'prepare_local_gen', arguments: {ticketKey: 'VAL-1928', scenarios: [{name: 'Today', given: 'Login', when: 'Tap Today', then: 'Back to top'}], flowforgeScript: '// TODO: missing\nthrow new Error("INCOMPLETE SCRIPT");'}}})}), env);
+    assert.equal(handoff.status, 200);
+    const handoffJson = JSON.parse((await handoff.json()).result.content[0].text);
+    assert.equal(handoffJson.nextMcp, 'flowforge-local-sim');
+    assert.equal(handoffJson.nextLocalCall.tool, 'enrich_flowforge_script');
+    assert.equal(handoffJson.nextLocalCall.arguments.ticketKey, 'VAL-1928');
+    assert.equal(handoffJson.nextLocalCall.arguments.scenarios.length, 1);
   } finally { globalThis.fetch = originalFetch; }
 });
 

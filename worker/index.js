@@ -202,9 +202,9 @@ function verifyOrigin(request, env) {
 }
 
 const MCP_INSTRUCTIONS = [
-  'This cloud MCP is Jira + GWT + script draft only. It cannot reach your iOS Simulator.',
-  'Simulator a11y scan / path explore requires a second local MCP: flowforge-local-sim.',
-  'Call get_sim_scan_setup for Cursor mcp.json snippet, required tools, and docs URL.',
+  'Pipeline: (1) cloud load_jira_ticket + parse_gwt, (2) optional cloud generate_test_script for a draft, (3) prepare_local_gen to build the handoff, (4) call flowforge-local-sim tools with that handoff to write trueid-v3-uitest specs.',
+  'This cloud MCP cannot reach an iOS Simulator. Runnable local scripts require flowforge-local-sim.',
+  'If local MCP is missing, call get_sim_scan_setup first. After scenarios exist, always call prepare_local_gen then switch to local generate_test_script or enrich_flowforge_script.',
 ].join(' ');
 
 function simScanSetup(env) {
@@ -223,7 +223,7 @@ function simScanSetup(env) {
     },
   };
   return {
-    whySeparate: 'Cloud MCP has no access to your Mac Simulator. Scan must run as a local stdio MCP beside this cloud MCP.',
+    whySeparate: 'Cloud MCP has no access to your Mac Simulator. Scan and local script gen must run as a local stdio MCP beside this cloud MCP.',
     docsUrl,
     repoUrl,
     localSimDocsInRepo: 'local-sim/README.md',
@@ -248,8 +248,87 @@ function simScanSetup(env) {
       'Keep flowforge-mobilewright (this cloud URL) for Jira/GWT.',
       'Add flowforge-local-sim from cursorMcpJsonSnippet (replace PATH_TO_trueid-ios-v3).',
       'Restart Cursor MCP until flowforge-local-sim is ready.',
-      'Call scan_accessibility_ids or explore_sim_paths when you need live a11y/paths.',
+      'Cloud: load_jira_ticket → parse_gwt → prepare_local_gen.',
+      'Local: call the tool + arguments from prepare_local_gen.nextLocalCall (writes tests/generated_mcp/).',
+      'Optional: scan_accessibility_ids / explore_sim_paths when gen is stuck or you need live ids.',
     ],
+  };
+}
+
+function normalizeScenario(raw, index) {
+  if (!raw || typeof raw !== 'object') {
+    return {name: `Scenario ${index + 1}`, given: '', when: '', then: ''};
+  }
+  return {
+    name: String(raw.name || raw.title || `Scenario ${index + 1}`),
+    given: String(raw.given || raw.Given || ''),
+    when: String(raw.when || raw.When || ''),
+    then: String(raw.then || raw.Then || ''),
+    ...(raw.source ? {source: String(raw.source)} : {}),
+  };
+}
+
+/** Build handoff so the agent can call local MCP gen with exact arguments. */
+function prepareLocalGen(args = {}) {
+  const ticketKey = String(args.ticketKey || args.ticket || 'NO-TICKET').trim() || 'NO-TICKET';
+  const scenarios = Array.isArray(args.scenarios)
+    ? args.scenarios.map(normalizeScenario)
+    : [];
+  if (scenarios.length === 0) {
+    throw new AppError(400, 'scenarios_required', 'prepare_local_gen requires scenarios[] from parse_gwt (or equivalent).');
+  }
+  const flowforgeScript = String(args.flowforgeScript || args.cloudDraft || '');
+  const hasDraft = flowforgeScript.length > 0;
+  const todoCount = (flowforgeScript.match(/TODO:/g) || []).length;
+  const warningCount = (flowforgeScript.match(/WARNING:/g) || []).length;
+  const incomplete = /INCOMPLETE/i.test(flowforgeScript);
+  const useEnrich = hasDraft && (todoCount > 0 || warningCount > 0 || incomplete || Boolean(args.preferEnrich));
+
+  const localTool = useEnrich ? 'enrich_flowforge_script' : 'generate_test_script';
+  const localArguments = useEnrich
+    ? {
+        ticketKey,
+        scenarios,
+        flowforgeScript,
+        explore: 'auto',
+        write: true,
+        launch: true,
+      }
+    : {
+        ticketKey,
+        scenarios,
+        explore: 'auto',
+        write: true,
+        launch: true,
+        createMissingHelpers: true,
+      };
+
+  return {
+    purpose: 'Handoff cloud GWT → local trueid-v3-uitest script generation',
+    nextMcp: 'flowforge-local-sim',
+    nextLocalCall: {
+      server: 'flowforge-local-sim',
+      tool: localTool,
+      arguments: localArguments,
+    },
+    agentInstructions: [
+      '1. Ensure flowforge-local-sim MCP status is ready (else get_sim_scan_setup + restart).',
+      `2. Call ${localTool} on flowforge-local-sim with nextLocalCall.arguments exactly (do not re-invent scenarios).`,
+      '3. Local gen reuses share helpers first; scans Simulator only when stuck (explore=auto).',
+      '4. Expected output path: trueid-v3-uitest/tests/generated_mcp/<ticketKey>.spec.ts',
+      '5. If local returns gaps/needs_scan, call scan_accessibility_ids or explore_sim_paths, then re-run the same local gen tool.',
+    ].join(' '),
+    ticketKey,
+    scenarioCount: scenarios.length,
+    scenarios,
+    cloudDraft: hasDraft
+      ? {present: true, todoCount, warningCount, incomplete, preferEnrich: useEnrich}
+      : {present: false},
+    notes: {
+      cloudGenerateIsDraftOnly: 'Cloud generate_test_script may emit INCOMPLETE drafts for e2e-style templates. Runnable uitest specs come from local MCP.',
+      shareFirst: true,
+      exploreDefault: 'auto',
+    },
   };
 }
 
@@ -257,10 +336,11 @@ const MCP_TOOLS = [
   {name: 'connect_jira', description: 'Create a Jira OAuth link for the authenticated MCP user. Open the link once, then call Jira tools again.', inputSchema: {type: 'object', properties: {}}},
   {name: 'load_jira_ticket', description: 'Load a Jira ticket using the connected user Jira account.', inputSchema: {type: 'object', properties: {ticket: {type: 'string'}, cloudId: {type: 'string'}}, required: ['ticket']}},
   {name: 'parse_gwt', description: 'Parse Gherkin/GWT text into test scenarios.', inputSchema: {type: 'object', properties: {text: {type: 'string'}, source: {type: 'string'}}, required: ['text']}},
-  {name: 'generate_test_script', description: 'Generate a Mobilewright test script from scenarios.', inputSchema: {type: 'object', properties: {ticketKey: {type: 'string'}, scenarios: {type: 'array'}}, required: ['scenarios']}},
+  {name: 'generate_test_script', description: 'Cloud draft only (may include INCOMPLETE). For a runnable trueid-v3-uitest spec, call prepare_local_gen then flowforge-local-sim generate_test_script/enrich_flowforge_script.', inputSchema: {type: 'object', properties: {ticketKey: {type: 'string'}, scenarios: {type: 'array'}}, required: ['scenarios']}},
   {name: 'format_jira_gwt', description: 'Format scenarios as Jira wiki text and HTML.', inputSchema: {type: 'object', properties: {scenarios: {type: 'array'}}, required: ['scenarios']}},
   {name: 'business_to_qa_detail', description: 'แปลง Business Expectation/GWT เป็น QA Execution Detail ภาษาไทยแบบละเอียด พร้อม precondition, test data, steps, expected result, evidence, edge case และ open questions.', inputSchema: {type: 'object', properties: {ticketKey: {type: 'string'}, businessExpectation: {type: 'string'}, comments: {type: 'string'}}, required: ['businessExpectation']}},
-  {name: 'get_sim_scan_setup', description: 'How to enable Simulator a11y scan / path explore. Cloud MCP cannot scan a Mac Simulator — returns Cursor mcp.json snippet for the separate local flowforge-local-sim MCP plus prerequisites and tool names.', inputSchema: {type: 'object', properties: {}}},
+  {name: 'get_sim_scan_setup', description: 'Install/ready the local flowforge-local-sim MCP (Cursor mcp.json snippet). Required before Simulator scan or local script generation.', inputSchema: {type: 'object', properties: {}}},
+  {name: 'prepare_local_gen', description: 'After parse_gwt (and optional cloud draft), build the exact handoff for flowforge-local-sim: which tool to call and arguments so local can write tests/generated_mcp/<ticket>.spec.ts (share-first, scan on gaps).', inputSchema: {type: 'object', properties: {ticketKey: {type: 'string'}, scenarios: {type: 'array', description: 'GWT scenarios [{name, given, when, then}]'}, flowforgeScript: {type: 'string', description: 'Optional cloud generate_test_script output to enrich'}, preferEnrich: {type: 'boolean'}}, required: ['scenarios']}},
 ];
 function mcpResult(id, result) { return json({jsonrpc: '2.0', id, result}); }
 function mcpError(id, code, message) { return json({jsonrpc: '2.0', id, error: {code, message}}); }
@@ -276,7 +356,7 @@ async function mcp(request, env, headers) {
     return mcpResult(body.id, {
       protocolVersion: '2025-06-18',
       capabilities: {tools: {}},
-      serverInfo: {name: 'flowforge', version: '1.1.0'},
+      serverInfo: {name: 'flowforge', version: '1.2.0'},
       instructions: MCP_INSTRUCTIONS,
     });
   }
@@ -299,6 +379,10 @@ async function mcp(request, env, headers) {
     if (name === 'business_to_qa_detail') { const result = businessToQaDetail(args); return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(result, null, 2)}], structuredContent: result}); }
     if (name === 'get_sim_scan_setup') {
       const result = simScanSetup(env);
+      return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(result, null, 2)}], structuredContent: result});
+    }
+    if (name === 'prepare_local_gen') {
+      const result = prepareLocalGen(args);
       return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(result, null, 2)}], structuredContent: result});
     }
     if (name === 'load_jira_ticket') {
