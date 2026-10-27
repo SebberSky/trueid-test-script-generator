@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../dist/server/index.js';
+import {businessToQaDetail} from '../worker/qa.js';
 
 const env = {APP_ORIGIN: 'https://flowforge.example', JIRA_CLIENT_ID: 'test-client', JIRA_CLIENT_SECRET: 'test-secret', SESSION_SECRET: 'a'.repeat(48)};
 const request = (path, init) => new Request(env.APP_ORIGIN + path, init);
@@ -41,7 +42,7 @@ test('MCP discovery, PKCE Jira login, token exchange and tools', async () => {
     assert.equal((await initialized.json()).result.serverInfo.name, 'flowforge');
     const listed = await worker.fetch(request('/mcp', {method: 'POST', headers: {'content-type': 'application/json', authorization: `Bearer ${tokenData.access_token}`}, body: JSON.stringify({jsonrpc: '2.0', id: 2, method: 'tools/list', params: {}})}), env);
     const names = (await listed.json()).result.tools.map(tool => tool.name);
-    assert.deepEqual(names, ['connect_jira', 'load_jira_ticket', 'parse_gwt', 'generate_test_script', 'format_jira_gwt']);
+    assert.deepEqual(names, ['connect_jira', 'load_jira_ticket', 'parse_gwt', 'generate_test_script', 'format_jira_gwt', 'business_to_qa_detail']);
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -65,4 +66,14 @@ test('Cursor-compatible API MCP endpoint exposes its own OAuth discovery', async
   const registration = await worker.fetch(request('/oauth/register', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({redirect_uris: ['http://localhost/callback']})}), env);
   assert.equal(registration.status, 200);
   assert.equal((await registration.json()).redirect_uris[0], 'http://localhost/callback');
+});
+
+test('business expectation converts to detailed Thai QA execution detail', () => {
+  const result = businessToQaDetail({ticketKey: 'EXP-16430', businessExpectation: '|Given|When|Then|\n| config เปิด | เล่นวิดีโอ | ต้องแสดงโฆษณา |', comments: 'ใช้ Proxyman และ PreProd'});
+  assert.equal(result.language, 'ไทยเท่านั้น');
+  assert.equal(result.title, 'QA Execution Detail: EXP-16430');
+  assert.ok(result.testCases.length >= 1);
+  assert.ok(result.testCases[0].steps.length >= 4);
+  assert.equal(result.testCases[0].status, 'READY FOR QA');
+  assert.match(JSON.stringify(result), /Proxyman/);
 });

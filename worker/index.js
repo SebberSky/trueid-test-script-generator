@@ -1,5 +1,6 @@
 import {collectMedia, mediaInventory, inlineMime} from './media.js';
 import {parseGwt, generateScript, formatJiraGwt} from './parser.js';
+import {businessToQaDetail} from './qa.js';
 // Atlassian tokens are encrypted with a server-only key in HttpOnly session cookies.
 const SCOPES = ['read:jira-work', 'read:jira-user', 'read:me', 'read:account', 'offline_access'];
 const CALLBACK = '/api/auth/jira/callback';
@@ -206,6 +207,7 @@ const MCP_TOOLS = [
   {name: 'parse_gwt', description: 'Parse Gherkin/GWT text into test scenarios.', inputSchema: {type: 'object', properties: {text: {type: 'string'}, source: {type: 'string'}}, required: ['text']}},
   {name: 'generate_test_script', description: 'Generate a Mobilewright test script from scenarios.', inputSchema: {type: 'object', properties: {ticketKey: {type: 'string'}, scenarios: {type: 'array'}}, required: ['scenarios']}},
   {name: 'format_jira_gwt', description: 'Format scenarios as Jira wiki text and HTML.', inputSchema: {type: 'object', properties: {scenarios: {type: 'array'}}, required: ['scenarios']}},
+  {name: 'business_to_qa_detail', description: 'แปลง Business Expectation/GWT เป็น QA Execution Detail ภาษาไทยแบบละเอียด พร้อม precondition, test data, steps, expected result, evidence, edge case และ open questions.', inputSchema: {type: 'object', properties: {ticketKey: {type: 'string'}, businessExpectation: {type: 'string'}, comments: {type: 'string'}}, required: ['businessExpectation']}},
 ];
 function mcpResult(id, result) { return json({jsonrpc: '2.0', id, result}); }
 function mcpError(id, code, message) { return json({jsonrpc: '2.0', id, error: {code, message}}); }
@@ -234,6 +236,7 @@ async function mcp(request, env, headers) {
     if (name === 'parse_gwt') return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(parseGwt(args.text, args.source || 'MCP input'))}], structuredContent: {scenarios: parseGwt(args.text, args.source || 'MCP input')}});
     if (name === 'generate_test_script') return mcpResult(body.id, {content: [{type: 'text', text: generateScript(args.ticketKey || 'MCP', args.scenarios || []).code}], structuredContent: generateScript(args.ticketKey || 'MCP', args.scenarios || [])});
     if (name === 'format_jira_gwt') return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(formatJiraGwt(args.scenarios || []))}], structuredContent: formatJiraGwt(args.scenarios || [])});
+    if (name === 'business_to_qa_detail') { const result = businessToQaDetail(args); return mcpResult(body.id, {content: [{type: 'text', text: JSON.stringify(result, null, 2)}], structuredContent: result}); }
     if (name === 'load_jira_ticket') {
       const url = new URL(request.url); url.pathname = '/api/jira/ticket'; url.search = new URLSearchParams({ticket: args.ticket, ...(args.cloudId ? {cloudId: args.cloudId} : {})}).toString();
       const token = siteUser ? await jiraTokenForSiteUser(request, env, headers) : null;
