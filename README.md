@@ -48,6 +48,13 @@ Raster images have lazy previews; videos and audio use native browser players wi
 
 This feature presents and downloads media. It does not perform OCR, vision inference, transcription, or automatically convert media content into GWT.
 
+## MCP
+
+Two MCP surfaces:
+
+1. **Cloud** (`/api/mcp`) — Jira OAuth, load ticket, parse GWT, draft Mobilewright script, `get_sim_scan_setup`. Docs: `/mcp` (`web/mcp-docs.html`).
+2. **Local Simulator** — a11y scan / path explore on your Mac. Not runnable in the cloud worker. Setup: [`local-sim/README.md`](local-sim/README.md) or call cloud tool `get_sim_scan_setup`.
+
 ## Publishing
 
 Build with `node scripts/build.mjs`; use the Sites source workflow to commit and push the exact source and package `dist/server/index.js` plus `dist/.openai/hosting.json`. Preserve the existing `project_id` and audience. Production credentials are managed separately from Git.

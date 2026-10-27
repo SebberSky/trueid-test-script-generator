@@ -39,10 +39,16 @@ test('MCP discovery, PKCE Jira login, token exchange and tools', async () => {
 
     const initialized = await worker.fetch(request('/mcp', {method: 'POST', headers: {'content-type': 'application/json', authorization: `Bearer ${tokenData.access_token}`}, body: JSON.stringify({jsonrpc: '2.0', id: 1, method: 'initialize', params: {}})}), env);
     assert.equal(initialized.status, 200);
-    assert.equal((await initialized.json()).result.serverInfo.name, 'flowforge');
+    const initBody = await initialized.json();
+    assert.equal(initBody.result.serverInfo.name, 'flowforge');
+    assert.match(String(initBody.result.instructions || ''), /flowforge-local-sim/);
     const listed = await worker.fetch(request('/mcp', {method: 'POST', headers: {'content-type': 'application/json', authorization: `Bearer ${tokenData.access_token}`}, body: JSON.stringify({jsonrpc: '2.0', id: 2, method: 'tools/list', params: {}})}), env);
     const names = (await listed.json()).result.tools.map(tool => tool.name);
-    assert.deepEqual(names, ['connect_jira', 'load_jira_ticket', 'parse_gwt', 'generate_test_script', 'format_jira_gwt', 'business_to_qa_detail']);
+    assert.deepEqual(names, ['connect_jira', 'load_jira_ticket', 'parse_gwt', 'generate_test_script', 'format_jira_gwt', 'business_to_qa_detail', 'get_sim_scan_setup']);
+    const setup = await worker.fetch(request('/mcp', {method: 'POST', headers: {'content-type': 'application/json', authorization: `Bearer ${tokenData.access_token}`}, body: JSON.stringify({jsonrpc: '2.0', id: 3, method: 'tools/call', params: {name: 'get_sim_scan_setup', arguments: {}}})}), env);
+    assert.equal(setup.status, 200);
+    const setupBody = await setup.json();
+    assert.match(setupBody.result.content[0].text, /flowforge-local-sim/);
   } finally { globalThis.fetch = originalFetch; }
 });
 
