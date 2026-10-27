@@ -2,7 +2,7 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises';
 const root = new URL('../', import.meta.url);
 const read = path => readFile(new URL(path, root), 'utf8');
 const page = (await read('web/index.html')).replace(/<script type="text\/plain" id="legacy-demo-disabled">[\s\S]*?<\/script>/, '');
-const mcpDocs = await read('web/mcp-docs.html');
+const mcpDocs = await read('web/mcp-docs-v2.html');
 const assets = Object.fromEntries(await Promise.all(['app.js', 'parser.js', 'media.js'].map(async name => ['/' + name, await read('web/' + name)])));
 const media = (await read('worker/media.js')).replace(/^export /gm, '');
 const parser = (await read('web/parser.js')).replace(/^export /gm, '');
