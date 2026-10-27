@@ -164,6 +164,10 @@ async function mcpToken(request, env) {
   const access = await seal({token: record.tokens.access_token, until: Date.now() + Math.min(Number(record.tokens.expires_in), 3600) * 1000}, env, 'mcp_access');
   return json({access_token: access, token_type: 'Bearer', expires_in: Math.min(Number(record.tokens.expires_in), 3600), scope: 'jira:read'});
 }
+async function mcpRegister(request) {
+  const body = await request.json().catch(() => ({}));
+  return json({client_id: 'flowforge-' + random().slice(0, 22), client_id_issued_at: Math.floor(Date.now() / 1000), redirect_uris: body.redirect_uris || [], token_endpoint_auth_method: 'none', grant_types: ['authorization_code'], response_types: ['code'], scope: 'jira:read'});
+}
 function siteUserId(request) { return request.headers.get('oai-authenticated-user-id') || ''; }
 async function saveJiraForUser(env, userId, tokens) {
   if (!env.DB) throw new AppError(503, 'storage_unavailable', 'Jira MCP connection storage is not configured.');
@@ -362,13 +366,15 @@ async function attachmentContent(request, env, headers) {
 async function handle(request, env, headers) {
   const url = new URL(request.url);
   if (url.pathname === '/mcp' && request.method === 'POST' && request.headers.get('Mcp-Method') === 'server/discover') return mcpResult(null, {supportedVersions: ['2026-07-28'], capabilities: {tools: {}}});
-  if (url.pathname === '/.well-known/oauth-authorization-server' && request.method === 'GET') return json({issuer: origin(env), authorization_endpoint: origin(env) + '/oauth/authorize', token_endpoint: origin(env) + '/oauth/token', response_types_supported: ['code'], grant_types_supported: ['authorization_code'], code_challenge_methods_supported: ['S256'], scopes_supported: ['jira:read']}, 200, headers);
+  if ((url.pathname === '/.well-known/oauth-authorization-server' || url.pathname === '/.well-known/oauth-authorization-server/api/mcp') && request.method === 'GET') return json({issuer: origin(env), authorization_endpoint: origin(env) + '/oauth/authorize', token_endpoint: origin(env) + '/oauth/token', registration_endpoint: origin(env) + '/oauth/register', response_types_supported: ['code'], grant_types_supported: ['authorization_code'], code_challenge_methods_supported: ['S256'], scopes_supported: ['jira:read']}, 200, headers);
+  if ((url.pathname === '/.well-known/oauth-protected-resource/api/mcp' || url.pathname === '/.well-known/oauth-protected-resource') && request.method === 'GET') return json({resource: origin(env) + '/api/mcp', authorization_servers: [origin(env)], bearer_methods_supported: ['header'], scopes_supported: ['jira:read']}, 200, headers);
+  if (url.pathname === '/oauth/register' && request.method === 'POST') return mcpRegister(request);
   if (url.pathname === '/oauth/authorize' && request.method === 'GET') return mcpAuthorize(request, env, headers);
   if (url.pathname === '/oauth/token' && request.method === 'POST') return mcpToken(request, env);
   if (url.pathname === '/api/auth/mcp/callback' && request.method === 'GET') return mcpCallback(request, env, headers);
   if (url.pathname === '/api/auth/mcp/jira-callback' && request.method === 'GET') return mcpSiteJiraCallback(request, env, headers);
   if (url.pathname === '/.well-known/oauth-protected-resource/mcp' && request.method === 'GET') return json({resource: origin(env) + '/mcp', authorization_servers: [origin(env)], bearer_methods_supported: ['header'], scopes_supported: ['jira:read']}, 200, headers);
-  if (url.pathname === '/mcp') return mcp(request, env, headers);
+  if (url.pathname === '/mcp' || url.pathname === '/api/mcp') return mcp(request, env, headers);
   if (request.method === 'GET' && url.pathname === '/mcp-docs') return new Response(MCP_DOCS, {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'}});
   if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return new Response(PAGE, {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'}});
   if (request.method === 'GET' && ASSETS[url.pathname]) return new Response(ASSETS[url.pathname], {headers: {'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache'}});
@@ -428,6 +434,7 @@ export default {
     try { response = await handle(request, env, headers); }
     catch (error) {
       response = json({error: error instanceof AppError ? error.code : 'internal_error', message: error instanceof AppError ? error.message : 'An unexpected error occurred.'}, error instanceof AppError ? error.status : 500, headers);
+      if (response.status === 401 && new URL(request.url).pathname === '/api/mcp') response.headers.set('WWW-Authenticate', `Bearer resource_metadata="${origin(env)}/.well-known/oauth-protected-resource/api/mcp", scope="jira:read"`);
       if (response.status === 401 && env.APP_ORIGIN) for (const name of ['ff_access', 'ff_refresh']) response.headers.append('Set-Cookie', cookie(name, '', 0, env));
     }
     response.headers.set('X-Content-Type-Options', 'nosniff');

@@ -51,3 +51,18 @@ test('MCP rejects invalid PKCE and malformed bearer tokens', async () => {
   const response = await worker.fetch(request('/mcp', {method: 'POST', headers: {authorization: 'Bearer invalid'}, body: '{}'}), env);
   assert.equal(response.status, 401);
 });
+
+test('Cursor-compatible API MCP endpoint exposes its own OAuth discovery', async () => {
+  const protectedMetadata = await worker.fetch(request('/.well-known/oauth-protected-resource/api/mcp'), env);
+  assert.equal(protectedMetadata.status, 200);
+  assert.deepEqual((await protectedMetadata.json()).authorization_servers, [env.APP_ORIGIN]);
+  const authMetadata = await worker.fetch(request('/.well-known/oauth-authorization-server/api/mcp'), env);
+  assert.equal(authMetadata.status, 200);
+  assert.equal((await authMetadata.json()).registration_endpoint, env.APP_ORIGIN + '/oauth/register');
+  const anonymous = await worker.fetch(request('/api/mcp', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'}), env);
+  assert.equal(anonymous.status, 401);
+  assert.match(anonymous.headers.get('www-authenticate'), /oauth-protected-resource\/api\/mcp/);
+  const registration = await worker.fetch(request('/oauth/register', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({redirect_uris: ['http://localhost/callback']})}), env);
+  assert.equal(registration.status, 200);
+  assert.equal((await registration.json()).redirect_uris[0], 'http://localhost/callback');
+});
